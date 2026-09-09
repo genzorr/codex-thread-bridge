@@ -47,6 +47,31 @@ def validate_sandbox_policy(policy: dict):
         raise ValueError("Expected sandbox policy writableRoots must be absolute paths")
 
 
+def validate_workspace_roots(policy):
+    for value in policy.get("writableRoots", []):
+        path = Path(value)
+        if (path.exists() or path.is_symlink()) and not path.is_dir():
+            raise ValueError("writableRoots must be directories, not files, sockets or devices")
+
+
+def validate_execution_policy(approval_policy, approvals_reviewer):
+    if approval_policy not in {"never", "on-request"}:
+        raise ValueError("Supported policies are never or on-request with App Server Auto-review")
+    if approvals_reviewer not in {"user", "auto_review"}:
+        raise ValueError("Unsupported approvals reviewer")
+    if approval_policy != "never" and approvals_reviewer != "auto_review":
+        raise ValueError("Interactive client approvals unsupported; use App Server Auto-review")
+
+
+def identity(settings):
+    return {
+        "thread_id": settings["thread"]["id"],
+        "cwd": settings["cwd"],
+        "model": settings["model"],
+        "reasoning_effort": settings["reasoningEffort"],
+    }
+
+
 def clipped(value, limit: int, *, display_text: bool = False):
     """Bound display content while preserving opaque protocol fields verbatim."""
     if display_text and isinstance(value, str) and len(value) > limit:
@@ -125,7 +150,19 @@ class Bridge:
         sandbox: str = "read-only",
         model: str | None = None,
         app_server_project_id: str | None = None,
+        sandbox_policy: dict | None = None,
+        approval_policy: str = "never",
+        approvals_reviewer: str = "auto_review",
     ):
+        validate_execution_policy(approval_policy, approvals_reviewer)
+        if sandbox_policy is not None:
+            validate_sandbox_policy(sandbox_policy)
+            if sandbox_policy["type"] != {
+                "read-only": "readOnly",
+                "workspace-write": "workspaceWrite",
+                "danger-full-access": "dangerFullAccess",
+            }.get(sandbox):
+                raise ValueError("sandbox and sandbox_policy.type must agree")
         nonempty(cwd, "cwd")
         if not Path(cwd).is_absolute():
             raise ValueError("cwd must be an existing absolute directory on the App Server host")
@@ -135,14 +172,36 @@ class Bridge:
             if value is not None:
                 nonempty(value, name, 100_000 if name == "prompt" else 500)
         params = {"cwd": cwd, "sandbox": sandbox, "approvalPolicy": "never", "ephemeral": False}
+        if approval_policy != "never":
+            params.update(approvalPolicy=approval_policy, approvalsReviewer=approvals_reviewer)
         if model is not None:
             params["model"] = model
         if app_server_project_id is not None:
             nonempty(app_server_project_id, "app_server_project_id", 128)
             params["projectId"] = app_server_project_id
 
+        if sandbox_policy is not None:
+            params["approvalsReviewer"] = approvals_reviewer
+            if sandbox_policy["type"] == "workspaceWrite":
+                params["config"] = {
+                    "sandbox_workspace_write": {
+                        "writable_roots": sandbox_policy["writableRoots"],
+                        "network_access": sandbox_policy["networkAccess"],
+                        "exclude_tmpdir_env_var": sandbox_policy["excludeTmpdirEnvVar"],
+                        "exclude_slash_tmp": sandbox_policy["excludeSlashTmp"],
+                    }
+                }
+            elif sandbox_policy["type"] == "readOnly" and sandbox_policy["networkAccess"]:
+                raise ValueError(
+                    "Network-enabled read-only creation unsupported; use a workspace policy"
+                )
         launch_params = dict(params)
         request_params = {**params, "prompt": prompt, "title": title}
+        # Preserve retained fingerprints for calls using the original defaults.
+        if sandbox_policy is not None:
+            request_params.update(
+                sandbox_policy=sandbox_policy, approvals_reviewer=approvals_reviewer
+            )
 
         def legacy_params():
             # Old receipts hashed a resolved cwd; only legacy lookups may use this form.
@@ -151,6 +210,8 @@ class Bridge:
         def validate_fresh():
             # The fingerprint uses the supplied path, not mutable symlink resolution.
             launch_params["cwd"] = absolute_directory(cwd)
+            if sandbox_policy is not None:
+                validate_workspace_roots(sandbox_policy)
 
         async def action(receipt):
             if app_server_project_id is not None:
@@ -167,7 +228,7 @@ class Bridge:
             }[sandbox]
             if (
                 created.get("cwd") != launch_params["cwd"]
-                or created.get("approvalPolicy") != "never"
+                or created.get("approvalPolicy") != approval_policy
                 or actual != expected
             ):
                 raise RpcError(
@@ -178,6 +239,21 @@ class Bridge:
                         "Inspect creation receipt. The thread remains retained.",
                     },
                 )
+            if (sandbox_policy is not None and created.get("sandbox") != sandbox_policy) or (
+                (sandbox_policy is not None or approval_policy != "never")
+                and created.get("approvalsReviewer") != approvals_reviewer
+            ):
+                raise RpcError(
+                    "thread/start",
+                    {
+                        "code": "environment_mismatch",
+                        "message": "Effective permission policy differs; prompt withheld",
+                    },
+                )
+            if sandbox_policy is not None:
+                receipt["permissionsAfter"] = created
+                receipt["permissionUpdateState"] = "verified"
+                self.ledger.save(receipt)
             if title is not None:
                 await self.rpc.call("thread/name/set", {"threadId": thread_id, "name": title})
                 receipt["title"] = title
@@ -378,6 +454,125 @@ class Bridge:
 
         return await self._mutate(request_id, "create_worktree_thread", params, action)
 
+    async def _idle_settings(self, thread_id):
+        state = (await self.rpc.call("thread/read", {"threadId": thread_id}))["thread"]
+        if state.get("status", {}).get("type") not in {"idle", "notLoaded"}:
+            raise RpcError(
+                "thread/read",
+                {"code": "thread_busy", "message": "Task is not idle; no settings changed"},
+            )
+        settings = await self.rpc.call(
+            "thread/resume", {"threadId": thread_id, "excludeTurns": True}
+        )
+        if settings["thread"].get("status", {}).get("type") != "idle":
+            raise RpcError(
+                "thread/resume",
+                {"code": "thread_busy", "message": "Task became active; no settings changed"},
+            )
+        return settings
+
+    async def _apply_permissions(
+        self,
+        receipt,
+        thread_id,
+        sandbox_policy,
+        approval_policy,
+        approvals_reviewer,
+        expected_identity,
+    ):
+        before = await self._idle_settings(thread_id)
+        receipt["permissionsBefore"] = before
+        self.ledger.save(receipt)
+        if identity(before) != expected_identity:
+            raise RpcError(
+                "thread/resume",
+                {
+                    "code": "identity_mismatch",
+                    "message": "Task identity/settings differ; no update sent",
+                },
+            )
+        state = (await self.rpc.call("thread/read", {"threadId": thread_id}))["thread"]
+        if state.get("status", {}).get("type") != "idle":
+            raise RpcError(
+                "thread/read",
+                {"code": "thread_busy", "message": "Task became active; no update sent"},
+            )
+        receipt["permissionUpdateState"] = "outcome_unknown"
+        self.ledger.save(receipt)
+        await self.rpc.call(
+            "thread/settings/update",
+            {
+                "threadId": thread_id,
+                "sandboxPolicy": sandbox_policy,
+                "approvalPolicy": approval_policy,
+                "approvalsReviewer": approvals_reviewer,
+            },
+        )
+        after = await self.rpc.call("thread/resume", {"threadId": thread_id, "excludeTurns": True})
+        receipt["permissionsAfter"] = after
+        self.ledger.save(receipt)
+        if (
+            identity(after) != expected_identity
+            or after.get("runtimeWorkspaceRoots") != before.get("runtimeWorkspaceRoots")
+            or after.get("sandbox") != sandbox_policy
+            or after.get("approvalPolicy") != approval_policy
+            or after.get("approvalsReviewer") != approvals_reviewer
+        ):
+            raise RpcError(
+                "thread/settings/update",
+                {
+                    "code": "permission_verification_failed",
+                    "message": "Effective settings differ; inspect receipt before further actions",
+                },
+            )
+        receipt["permissionUpdateState"] = "verified"
+
+    async def update_thread_permissions(
+        self,
+        request_id,
+        thread_id,
+        sandbox_policy,
+        expected_identity,
+        approval_policy="never",
+        approvals_reviewer="auto_review",
+    ):
+        nonempty(thread_id, "thread_id", 128)
+        validate_sandbox_policy(sandbox_policy)
+        validate_execution_policy(approval_policy, approvals_reviewer)
+        if (
+            set(expected_identity) != {"thread_id", "cwd", "model", "reasoning_effort"}
+            or expected_identity["thread_id"] != thread_id
+        ):
+            raise ValueError(
+                "Expected identity must contain this thread_id, cwd, model, reasoning_effort"
+            )
+        params = {
+            "threadId": thread_id,
+            "sandboxPolicy": sandbox_policy,
+            "expectedIdentity": expected_identity,
+            "approvalPolicy": approval_policy,
+            "approvalsReviewer": approvals_reviewer,
+        }
+
+        async def action(receipt):
+            receipt["threadId"] = thread_id
+            await self._apply_permissions(
+                receipt,
+                thread_id,
+                sandbox_policy,
+                approval_policy,
+                approvals_reviewer,
+                expected_identity,
+            )
+
+        return await self._mutate(
+            request_id,
+            "update_thread_permissions",
+            params,
+            action,
+            validate_fresh=lambda: validate_workspace_roots(sandbox_policy),
+        )
+
     async def send_message_to_thread(self, request_id: str, thread_id: str, message: str):
         nonempty(thread_id, "thread_id", 128)
         nonempty(message, "message")
@@ -405,12 +600,15 @@ class Bridge:
             )
             receipt["resumed"] = resumed
             self.ledger.save(receipt)
-            if resumed.get("approvalPolicy") != "never":
+            if resumed.get("approvalPolicy") != "never" and not (
+                resumed.get("approvalPolicy") == "on-request"
+                and resumed.get("approvalsReviewer") == "auto_review"
+            ):
                 raise RpcError(
                     "thread/resume",
                     {
                         "code": "unsupported_approval_policy",
-                        "message": "Interactive approvals unsupported; message withheld. "
+                        "message": "Client-side approvals unsupported; message withheld. "
                         "Continue the thread in Desktop.",
                     },
                 )

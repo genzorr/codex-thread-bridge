@@ -93,7 +93,7 @@ use them with `wait_thread`. After checking the session in Desktop, use
 }
 ```
 
-Creation defaults to `read-only` and approval policy `never`. `workspace-write`
+Creation defaults to `read-only` and approval policy `never`; explicit execution settings are documented below. `workspace-write`
 and `danger-full-access` are explicit options; obtain authorization for the
 chosen environment before calling. Omitted model/reasoning use the server's
 configured defaults. Initial dispatch is withheld if the returned cwd, sandbox
@@ -150,8 +150,7 @@ matching and do not apply this legacy fallback.
 
 Reading, listing, waiting, and Goal inspection never resume or modify a thread.
 Messaging explicitly calls `thread/resume` without configuration overrides before
-`turn/start`. It refuses a thread observed active or a resumed interactive approval
-policy. Concurrent external clients can still change a thread between those
+`turn/start`. It refuses an active thread or a client-side approval policy; `on-request` with App Server Auto-review is supported. Concurrent external clients can still change a thread between those
 steps; the App Server remains authoritative. There is no automatic steering or
 interruption. Unsupported client-side tool/approval requests receive an explicit
 error; continue those tasks in Desktop.
@@ -260,3 +259,13 @@ If the system temporary directory is inside a Git checkout, pass pytest a
 - [Missing SSH-hosted Desktop tools report](https://github.com/openai/codex/issues/40865)
 
 Independent project, not affiliated with or endorsed by OpenAI. MIT licensed.
+
+## Explicit execution permissions
+
+`update_thread_permissions` applies one user-authorized, complete `sandbox_policy` through `thread/settings/update`. Supply the exact current `expected_identity` fields (`thread_id`, `cwd`, `model`, `reasoning_effort`), plus `approval_policy` and `approvals_reviewer`. The task must be idle. The bridge records before/after settings, verifies permissions and identity/workspace-root preservation, and never starts a turn as part of an update. A concurrent external client can race the final idle check; coordinate task ownership while updating. There is no atomic App Server idle compare-and-set.
+
+Existing-directory `create_thread` accepts `sandbox_policy` with its matching `sandbox` kind and verifies the complete effective policy before the initial prompt. Defaults remain read-only and approval `never`. Explicit `on-request` requires `approvals_reviewer="auto_review"`, so the App Server owns escalation review. Messaging carries no settings overrides and accepts `never` or `on-request` with Auto-review; human/client-side approvals remain unsupported and are never silently approved. This does not promise approval of every requested action.
+
+Updates require a stable `request_id`, including failures. A replay returns the original receipt without dispatching again or continuing a partial operation. On unknown outcomes inspect `get_operation` and effective task settings before deciding on a separately authorized action. Profile changes are task-scoped; no global permissions or other tasks are modified. Existing bridge processes must reload the MCP to expose the new schema; an already-running model turn is not interrupted by editing the installed files.
+
+Workspace writable roots must be directories. Socket/device files are not supported workspace roots in the Linux sandbox; they can break every shell launch. Keep directory roots scoped to the approved checkouts and caches, enable network explicitly, and use App Server Auto-review for authorized operations requiring escalation. The bridge does not grant approval on behalf of Auto-review or change other tasks.

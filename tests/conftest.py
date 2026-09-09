@@ -15,6 +15,7 @@ class FakeServer:
     def __init__(self):
         self.calls = []
         self.threads = {}
+        self.settings = {}
         self.reject = {}
         self.drop_after = None
         self.override_creation = {}
@@ -67,7 +68,8 @@ class FakeServer:
                     "thread": dict(thread),
                     "cwd": params["cwd"],
                     "runtimeWorkspaceRoots": params.get("runtimeWorkspaceRoots", [params["cwd"]]),
-                    "approvalPolicy": "never",
+                    "approvalPolicy": params.get("approvalPolicy", "never"),
+                    "approvalsReviewer": params.get("approvalsReviewer", "user"),
                     "sandbox": {
                         "type": {
                             "read-only": "readOnly",
@@ -82,6 +84,17 @@ class FakeServer:
                     ),
                     **self.override_creation,
                 }
+                if "sandbox_workspace_write" in params.get("config", {}):
+                    policy = params["config"]["sandbox_workspace_write"]
+                    result["sandbox"] = {
+                        "type": "workspaceWrite",
+                        "writableRoots": policy["writable_roots"],
+                        "networkAccess": policy["network_access"],
+                        "excludeTmpdirEnvVar": policy["exclude_tmpdir_env_var"],
+                        "excludeSlashTmp": policy["exclude_slash_tmp"],
+                    }
+                result.update(self.override_creation)
+                self.settings[tid] = dict(result)
             elif method == "thread/name/set":
                 self.threads[params["threadId"]]["name"] = params["name"]
                 result = {}
@@ -101,7 +114,17 @@ class FakeServer:
                 result = {"thread": thread}
             elif method == "thread/resume":
                 thread = self.threads[params["threadId"]]
-                result = {"thread": {**thread, "turns": []}, "approvalPolicy": self.approval_policy}
+                result = {**self.settings[params["threadId"]], "thread": {**thread, "turns": []}}
+                if self.approval_policy != "never":
+                    result["approvalPolicy"] = self.approval_policy
+            elif method == "thread/settings/update":
+                settings = self.settings[params["threadId"]]
+                settings.update(
+                    sandbox=params["sandboxPolicy"],
+                    approvalPolicy=params["approvalPolicy"],
+                    approvalsReviewer=params["approvalsReviewer"],
+                )
+                result = {}
             elif method == "thread/turns/list":
                 turns = list(reversed(self.threads[params["threadId"]]["turns"]))
                 try:

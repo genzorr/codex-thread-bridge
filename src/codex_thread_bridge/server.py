@@ -55,17 +55,30 @@ def make_server(bridge: Bridge):
         sandbox: Literal["read-only", "workspace-write", "danger-full-access"] = "read-only",
         model: str | None = None,
         app_server_project_id: str | None = None,
+        sandbox_policy: dict[str, Any] | None = None,
+        approval_policy: Literal["never", "on-request"] = "never",
+        approvals_reviewer: Literal["user", "auto_review"] = "auto_review",
     ) -> dict[str, Any]:
         """Create a retained session in an existing cwd, optionally with an initial prompt.
 
         Requires approval of this action and sandbox. No worktree or persistent Goal is created.
-        Approval policy is never. Omitted model/reasoning use configured defaults. Supply only an
+        Approval defaults to never; on-request requires App Server Auto-review.
+        Explicit sandbox_policy is verified before dispatch. Supply only an
         App Server project ID, never assume a Desktop saved-project ID is interchangeable.
         Returns actual settings and IDs; verify Desktop association separately. Reusing request_id
         returns its receipt without resending. A failed/unknown operation may have created a thread.
         """
         return await bridge.create_thread(
-            request_id, cwd, prompt, title, sandbox, model, app_server_project_id
+            request_id,
+            cwd,
+            prompt,
+            title,
+            sandbox,
+            model,
+            app_server_project_id,
+            sandbox_policy,
+            approval_policy,
+            approvals_reviewer,
         )
 
     @mcp.tool(annotations=WRITE)
@@ -112,12 +125,37 @@ def make_server(bridge: Bridge):
         )
 
     @mcp.tool(annotations=WRITE)
+    async def update_thread_permissions(
+        request_id: str,
+        thread_id: str,
+        sandbox_policy: dict[str, Any],
+        expected_identity: dict[str, Any],
+        approval_policy: Literal["never", "on-request"] = "never",
+        approvals_reviewer: Literal["user", "auto_review"] = "auto_review",
+    ) -> dict[str, Any]:
+        """Apply explicitly authorized permissions to one idle task with before/after receipts.
+
+        expected_identity contains thread_id, cwd, model and reasoning_effort from current state.
+        Uses thread/settings/update without model, effort or cwd overrides. Does not start a turn,
+        interrupt, change global settings, or retry unknown outcomes. External clients can race
+        the idle check; coordinate ownership during the update. Reuse request_id for its receipt.
+        """
+        return await bridge.update_thread_permissions(
+            request_id,
+            thread_id,
+            sandbox_policy,
+            expected_identity,
+            approval_policy,
+            approvals_reviewer,
+        )
+
+    @mcp.tool(annotations=WRITE)
     async def send_message_to_thread(
         request_id: str, thread_id: str, message: str
     ) -> dict[str, Any]:
         """Resume the explicitly selected idle session without overrides and send one message.
 
-        Requires user authorization. Refuses an active thread and an interactive approval policy.
+        Requires user authorization. Supports never or on-request with App Server Auto-review.
         Resume may load the session; its actual settings are returned. Does not steer, interrupt,
         set Goals, or retry delivery. Use a stable request_id; inspect get_operation on uncertainty.
         """
