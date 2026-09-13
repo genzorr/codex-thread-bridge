@@ -58,6 +58,7 @@ def make_server(bridge: Bridge):
         sandbox_policy: dict[str, Any] | None = None,
         approval_policy: Literal["never", "on-request"] = "never",
         approvals_reviewer: Literal["user", "auto_review"] = "auto_review",
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         """Create a retained session in an existing cwd, optionally with an initial prompt.
 
@@ -67,6 +68,7 @@ def make_server(bridge: Bridge):
         App Server project ID, never assume a Desktop saved-project ID is interchangeable.
         Returns actual settings and IDs; verify Desktop association separately. Reusing request_id
         returns its receipt without resending. A failed/unknown operation may have created a thread.
+        Explicit model and reasoning_effort are verified before dispatching the initial prompt.
         """
         return await bridge.create_thread(
             request_id,
@@ -79,6 +81,7 @@ def make_server(bridge: Bridge):
             sandbox_policy,
             approval_policy,
             approvals_reviewer,
+            reasoning_effort,
         )
 
     @mcp.tool(annotations=WRITE)

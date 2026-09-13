@@ -153,8 +153,11 @@ class Bridge:
         sandbox_policy: dict | None = None,
         approval_policy: str = "never",
         approvals_reviewer: str = "auto_review",
+        reasoning_effort: str | None = None,
     ):
         validate_execution_policy(approval_policy, approvals_reviewer)
+        if reasoning_effort is not None:
+            nonempty(reasoning_effort, "reasoning_effort", 128)
         if sandbox_policy is not None:
             validate_sandbox_policy(sandbox_policy)
             if sandbox_policy["type"] != {
@@ -180,10 +183,11 @@ class Bridge:
             nonempty(app_server_project_id, "app_server_project_id", 128)
             params["projectId"] = app_server_project_id
 
+        config_overrides: dict[str, object] = {}
         if sandbox_policy is not None:
             params["approvalsReviewer"] = approvals_reviewer
             if sandbox_policy["type"] == "workspaceWrite":
-                params["config"] = {
+                config_overrides = {
                     "sandbox_workspace_write": {
                         "writable_roots": sandbox_policy["writableRoots"],
                         "network_access": sandbox_policy["networkAccess"],
@@ -195,6 +199,10 @@ class Bridge:
                 raise ValueError(
                     "Network-enabled read-only creation unsupported; use a workspace policy"
                 )
+        if reasoning_effort is not None:
+            config_overrides["model_reasoning_effort"] = reasoning_effort
+        if config_overrides:
+            params["config"] = config_overrides
         launch_params = dict(params)
         request_params = {**params, "prompt": prompt, "title": title}
         # Preserve retained fingerprints for calls using the original defaults.
@@ -230,6 +238,11 @@ class Bridge:
                 created.get("cwd") != launch_params["cwd"]
                 or created.get("approvalPolicy") != approval_policy
                 or actual != expected
+                or (model is not None and created.get("model") != model)
+                or (
+                    reasoning_effort is not None
+                    and created.get("reasoningEffort") != reasoning_effort
+                )
             ):
                 raise RpcError(
                     "thread/start",

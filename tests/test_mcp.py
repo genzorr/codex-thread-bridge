@@ -35,11 +35,20 @@ async def test_real_mcp_stdio_discovery_create_read_and_dedup(fake_server, tmp_p
         caps = await session.call_tool("get_capabilities", {})
         assert not caps.isError
         assert caps.structuredContent["capabilities"]["desktopManagedWorktrees"] is False
-        args = {"request_id": "mcp-create", "cwd": str(tmp_path), "prompt": "READY"}
+        create_schema = next(tool for tool in tools if tool.name == "create_thread").inputSchema
+        assert "reasoning_effort" in create_schema["properties"]
+        args = {
+            "request_id": "mcp-create",
+            "cwd": str(tmp_path),
+            "prompt": "READY",
+            "model": "gpt-5.6-sol",
+            "reasoning_effort": "high",
+        }
         result = await session.call_tool("create_thread", args)
         assert not result.isError
         receipt = result.structuredContent
         assert receipt["status"] == "accepted"
+        assert receipt["creation"]["reasoningEffort"] == "high"
         repeated = await session.call_tool("create_thread", args)
         assert repeated.structuredContent["replayed"]
         followup = await session.call_tool(
