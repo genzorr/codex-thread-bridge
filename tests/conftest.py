@@ -98,6 +98,8 @@ class FakeServer:
             elif method == "thread/name/set":
                 self.threads[params["threadId"]]["name"] = params["name"]
                 result = {}
+            elif method == "config/mcpServer/reload":
+                result = {}
             elif method == "turn/start":
                 thread = self.threads[params["threadId"]]
                 turn = {
