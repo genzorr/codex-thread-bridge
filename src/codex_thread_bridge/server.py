@@ -30,7 +30,7 @@ def make_server(bridge: Bridge):
     mcp = FastMCP(
         "codex-thread-bridge",
         instructions=(
-            "Create and message Codex sessions on this same host using its running App Server. "
+            "Create, message, and steer Codex sessions on this host using its App Server. "
             "Get user authorization before mutations. Use a stable request_id for each intended "
             "mutation; reuse it after an uncertain response and inspect get_operation. Never use "
             "a new ID to blindly retry. Accepted means dispatched, not completed. No automatic "
@@ -163,6 +163,22 @@ def make_server(bridge: Bridge):
         set Goals, or retry delivery. Use a stable request_id; inspect get_operation on uncertainty.
         """
         return await bridge.send_message_to_thread(request_id, thread_id, message)
+
+    @mcp.tool(annotations=WRITE)
+    async def steer_thread(
+        request_id: str, thread_id: str, expected_turn_id: str, message: str
+    ) -> dict[str, Any]:
+        """Append a message to one active turn without changing task settings.
+
+        Args:
+            request_id: Stable ID for one authorized message; reuse after uncertainty.
+            thread_id: Explicit target task ID.
+            expected_turn_id: Active turn ID; stale or idle targets are rejected.
+            message: Text to append to the active turn.
+        Returns:
+            Receipt; accepted means queued by App Server, not yet processed by the agent.
+        """
+        return await bridge.steer_thread(request_id, thread_id, expected_turn_id, message)
 
     @mcp.tool(annotations=READ)
     async def list_threads(

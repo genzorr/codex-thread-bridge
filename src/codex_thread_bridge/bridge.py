@@ -101,6 +101,7 @@ class Bridge:
             "capabilities": {
                 "createThread": True,
                 "sendMessage": True,
+                "steerActiveTurn": True,
                 "listReadWait": True,
                 "goalRead": True,
                 "goalSet": False,
@@ -638,6 +639,38 @@ class Bridge:
             request_id,
             "send_message_to_thread",
             {"threadId": thread_id, "message": message},
+            action,
+        )
+
+    async def steer_thread(
+        self, request_id: str, thread_id: str, expected_turn_id: str, message: str
+    ):
+        nonempty(thread_id, "thread_id", 128)
+        nonempty(expected_turn_id, "expected_turn_id", 128)
+        nonempty(message, "message")
+
+        async def action(receipt):
+            receipt["threadId"] = thread_id
+            receipt["expectedTurnId"] = expected_turn_id
+            self.ledger.save(receipt)
+            result = await self.rpc.call(
+                "turn/steer",
+                {
+                    "threadId": thread_id,
+                    "expectedTurnId": expected_turn_id,
+                    "input": [{"type": "text", "text": message}],
+                },
+            )
+            receipt["turnId"] = result["turnId"]
+            if receipt["turnId"] != expected_turn_id:
+                raise ValueError(
+                    "App Server returned a different turn ID; delivery outcome unknown"
+                )
+
+        return await self._mutate(
+            request_id,
+            "steer_thread",
+            {"threadId": thread_id, "expectedTurnId": expected_turn_id, "message": message},
             action,
         )
 

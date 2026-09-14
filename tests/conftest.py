@@ -107,6 +107,23 @@ class FakeServer:
                 }
                 thread["turns"].append(turn)
                 result = {"turn": turn}
+            elif method == "turn/steer":
+                thread = self.threads[params["threadId"]]
+                turn = thread["turns"][-1] if thread["turns"] else None
+                if (
+                    thread["status"]["type"] != "active"
+                    or turn is None
+                    or turn["status"] != "inProgress"
+                    or turn["id"] != params["expectedTurnId"]
+                ):
+                    await ws.send(
+                        json.dumps(
+                            {"id": ident, "error": {"code": -32602, "message": "turn not active"}}
+                        )
+                    )
+                    continue
+                turn["items"].append({"type": "userMessage", "text": params["input"][0]["text"]})
+                result = {"turnId": turn["id"]}
             elif method == "thread/read":
                 thread = dict(self.threads[params["threadId"]])
                 if not params.get("includeTurns"):

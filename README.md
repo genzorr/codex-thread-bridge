@@ -56,6 +56,7 @@ API key is needed; the existing App Server owns its authentication and model usa
 | `create_thread` | Create one durable session in an existing directory; optionally name it and send its initial prompt |
 | `create_worktree_thread` | Create a locked, retained bridge-managed Git worktree at an explicit commit and start a task; no Desktop-managed lifecycle |
 | `send_message_to_thread` | Resume an explicitly selected idle thread without configuration overrides, then send one message |
+| `steer_thread` | Append a message to one active turn with an exact turn ID precondition; does not resume or change settings |
 | `list_threads` | Read a page of unarchived backend thread summaries |
 | `read_thread` | Read metadata and a paginated history without resuming |
 | `wait_thread` | Wait up to 50 seconds for the supplied recent turn ID |
@@ -92,6 +93,19 @@ use them with `wait_thread`. After checking the session in Desktop, use
   "message": "Do not use tools or edit files. Reply exactly: BRIDGE_FOLLOWUP_OK"
 }
 ```
+
+To steer a task while its turn is active, obtain that task's current turn ID from `read_thread` or an earlier creation/message receipt and call `steer_thread` with a new request ID:
+
+```json
+{
+  "request_id": "demo-steer-001",
+  "thread_id": "<target threadId>",
+  "expected_turn_id": "<active turnId>",
+  "message": "Focus on the failing test before continuing."
+}
+```
+
+The App Server rejects the request if the turn has finished or another turn is active. An accepted receipt confirms dispatch to that turn, not that the agent has processed the message. Reuse the same request ID and inspect `get_operation` if the outcome is uncertain; do not send a new request ID to retry blindly.
 
 Creation defaults to `read-only` and approval policy `never`; explicit execution settings are documented below. `workspace-write`
 and `danger-full-access` are explicit options; obtain authorization for the
@@ -149,11 +163,7 @@ create a new ID to retry delivery. New receipts use strict supplied-argument
 matching and do not apply this legacy fallback.
 
 Reading, listing, waiting, and Goal inspection never resume or modify a thread.
-Messaging explicitly calls `thread/resume` without configuration overrides before
-`turn/start`. It refuses an active thread or a client-side approval policy; `on-request` with App Server Auto-review is supported. Concurrent external clients can still change a thread between those
-steps; the App Server remains authoritative. There is no automatic steering or
-interruption. Unsupported client-side tool/approval requests receive an explicit
-error; continue those tasks in Desktop.
+Messaging explicitly calls `thread/resume` without configuration overrides before `turn/start`. It refuses an active thread or a client-side approval policy; `on-request` with App Server Auto-review is supported. Concurrent external clients can still change a thread between those steps; the App Server remains authoritative. Active-turn steering calls `turn/steer` with an explicit turn ID and does not resume, interrupt, or override model, effort, cwd, or permissions. Unsupported client-side tool/approval requests receive an explicit error; continue those tasks in Desktop.
 
 ## Desktop compatibility
 

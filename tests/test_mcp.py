@@ -25,6 +25,7 @@ async def test_real_mcp_stdio_discovery_create_read_and_dedup(fake_server, tmp_p
             "create_thread",
             "create_worktree_thread",
             "send_message_to_thread",
+            "steer_thread",
             "read_thread",
             "list_threads",
             "wait_thread",
@@ -35,6 +36,7 @@ async def test_real_mcp_stdio_discovery_create_read_and_dedup(fake_server, tmp_p
         caps = await session.call_tool("get_capabilities", {})
         assert not caps.isError
         assert caps.structuredContent["capabilities"]["desktopManagedWorktrees"] is False
+        assert caps.structuredContent["capabilities"]["steerActiveTurn"] is True
         create_schema = next(tool for tool in tools if tool.name == "create_thread").inputSchema
         assert "reasoning_effort" in create_schema["properties"]
         args = {
@@ -61,6 +63,19 @@ async def test_real_mcp_stdio_discovery_create_read_and_dedup(fake_server, tmp_p
         )
         sent = followup.structuredContent
         assert sent["status"] == "accepted"
+        fake.threads[receipt["threadId"]]["status"] = {"type": "active"}
+        fake.threads[receipt["threadId"]]["turns"][-1]["status"] = "inProgress"
+        steer = await session.call_tool(
+            "steer_thread",
+            {
+                "request_id": "mcp-steer",
+                "thread_id": receipt["threadId"],
+                "expected_turn_id": sent["turnId"],
+                "message": "STEER",
+            },
+        )
+        assert steer.structuredContent["status"] == "accepted"
+        assert steer.structuredContent["turnId"] == sent["turnId"]
         waited = await session.call_tool(
             "wait_thread",
             {
@@ -77,6 +92,7 @@ async def test_real_mcp_stdio_discovery_create_read_and_dedup(fake_server, tmp_p
         invalid = await session.call_tool("create_thread", {**args, "sandbox": "invalid"})
         assert invalid.isError
     assert fake.count("thread/start") == 1 and fake.count("turn/start") == 2
+    assert fake.count("turn/steer") == 1
 
 
 async def test_mcp_socket_alias_restart_does_not_repeat_creation(fake_server, tmp_path):
