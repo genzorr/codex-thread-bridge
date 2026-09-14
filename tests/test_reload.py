@@ -20,7 +20,8 @@ async def test_reload_response_loss_is_not_retried(fake_server):
     assert fake.count("config/mcpServer/reload") == 1
 
 
-def test_reload_cli_decline_sends_nothing(monkeypatch, capsys):
+@pytest.mark.parametrize("answer", ["n", "", "maybe", "reload"])
+def test_reload_cli_decline_sends_nothing(monkeypatch, capsys, answer):
     calls = []
 
     async def request(socket):
@@ -28,13 +29,14 @@ def test_reload_cli_decline_sends_nothing(monkeypatch, capsys):
         return {}
 
     monkeypatch.setattr(reload_command, "request_reload", request)
-    monkeypatch.setattr("builtins.input", lambda prompt: "no")
+    monkeypatch.setattr("builtins.input", lambda prompt: answer)
     assert reload_command.main(["--socket", "/tmp/test.sock"]) == 1
     assert calls == []
     assert "no reload request sent" in capsys.readouterr().out
 
 
-def test_reload_cli_confirms_queued_refresh(monkeypatch, capsys):
+@pytest.mark.parametrize("answer", ["y", "Y", "yes"])
+def test_reload_cli_confirms_queued_refresh(monkeypatch, capsys, answer):
     calls = []
 
     async def request(socket):
@@ -42,7 +44,7 @@ def test_reload_cli_confirms_queued_refresh(monkeypatch, capsys):
         return {}
 
     monkeypatch.setattr(reload_command, "request_reload", request)
-    monkeypatch.setattr("builtins.input", lambda prompt: "reload")
+    monkeypatch.setattr("builtins.input", lambda prompt: answer)
     assert reload_command.main(["--socket", "/tmp/test.sock"]) == 0
     assert len(calls) == 1 and str(calls[0]) == "/tmp/test.sock"
     assert "refresh queued" in capsys.readouterr().out
@@ -56,7 +58,7 @@ def test_reload_cli_reports_unknown_outcome_without_retry(monkeypatch, capsys):
         raise TransportError("response unavailable")
 
     monkeypatch.setattr(reload_command, "request_reload", request)
-    monkeypatch.setattr("builtins.input", lambda prompt: "reload")
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
     assert reload_command.main(["--socket", "/tmp/test.sock"]) == 3
     assert len(calls) == 1
     assert "outcome unknown" in capsys.readouterr().err
@@ -67,6 +69,6 @@ def test_reload_cli_reports_server_rejection(monkeypatch, capsys):
         raise RpcError("config/mcpServer/reload", {"message": "rejected"})
 
     monkeypatch.setattr(reload_command, "request_reload", request)
-    monkeypatch.setattr("builtins.input", lambda prompt: "reload")
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
     assert reload_command.main(["--socket", "/tmp/test.sock"]) == 2
     assert "rejected" in capsys.readouterr().err

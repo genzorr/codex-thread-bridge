@@ -29,10 +29,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     try:
-        answer = input(f"Reload MCP servers via {args.socket}? Type 'reload' to confirm: ")
+        answer = input(f"Reload MCP servers via {args.socket}? [y/N]: ")
     except (EOFError, KeyboardInterrupt):
         answer = ""
-    if answer != "reload":
+    if answer.strip().lower() not in {"y", "yes"}:
         print("Cancelled; no reload request sent.")
         return 1
 

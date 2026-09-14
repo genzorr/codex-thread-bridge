@@ -39,7 +39,7 @@ command = "/absolute/path/codex-thread-bridge/.venv/bin/codex-thread-bridge"
 tool_timeout_sec = 60
 ```
 
-After bridge code or MCP configuration changes, request a reload from this checkout with `uv run --locked codex-thread-bridge-reload`. The command displays the target App Server socket and requires you to type `reload` before sending anything; pass `--socket /absolute/path/to/socket` if you use a nondefault socket. An accepted response means App Server queued a refresh for loaded tasks, not that every current task has already received the new tool schema. Start a fresh SSH-backed task and check its MCP tool inventory before a live test. The command does not restart the App Server.
+After bridge code or MCP configuration changes, request a reload from this checkout with `uv run --locked codex-thread-bridge-reload`. The command displays the target App Server socket and asks for `y/N` confirmation before sending anything; pass `--socket /absolute/path/to/socket` if you use a nondefault socket. An accepted response means App Server queued a refresh for loaded tasks, not that every current task has already received the new tool schema. Start a fresh SSH-backed task and check its MCP tool inventory before a live test. The command does not restart the App Server.
 
 The default socket is `$CODEX_HOME/app-server-control/app-server-control.sock`,
 with `CODEX_HOME` defaulting to `~/.codex`. Override it with `--socket /path/to.sock`.
