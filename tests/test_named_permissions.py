@@ -245,6 +245,92 @@ async def test_version_two_resolved_default_fingerprint_remains_replayable(fake_
         ledger.close()
 
 
+async def test_version_two_replay_rejects_changed_explicit_permissions(fake_server, tmp_path):
+    fake, socket = fake_server
+    ledger = Ledger(tmp_path / "explicit-profile-state" / "operations.sqlite3")
+    old_params = {
+        "cwd": str(tmp_path),
+        "approvalPolicy": "never",
+        "ephemeral": False,
+        "permissions": "development-profile",
+        "prompt": None,
+        "title": None,
+    }
+    fresh, receipt = ledger.begin("explicit-profile", "create_thread", old_params)
+    assert fresh
+    receipt.update(
+        status="accepted",
+        requestedPermissions={
+            "profile": "development-profile",
+            "sandbox": None,
+            "sandboxPolicy": None,
+            "approvalPolicy": "never",
+            "approvalsReviewer": "auto_review",
+        },
+    )
+    ledger.save(receipt)
+    rpc = AppServer(socket, timeout=1)
+    bridge = Bridge(rpc, ledger)
+    try:
+        with pytest.raises(ValueError, match="different arguments"):
+            await bridge.create_thread("explicit-profile", str(tmp_path), permissions=":workspace")
+        assert fake.count("permissionProfile/list") == 0
+        assert fake.count("thread/start") == 0
+    finally:
+        await rpc.close()
+        ledger.close()
+
+
+@pytest.mark.parametrize(
+    "changed_approval",
+    [
+        {"approval_policy": "on-request", "approvals_reviewer": "auto_review"},
+        {"approval_policy": "never", "approvals_reviewer": "user"},
+    ],
+)
+async def test_version_two_replay_rejects_changed_explicit_approval_inputs(
+    fake_server, tmp_path, changed_approval
+):
+    fake, socket = fake_server
+    ledger = Ledger(tmp_path / "explicit-approval-state" / "operations.sqlite3")
+    old_params = {
+        "cwd": str(tmp_path),
+        "approvalPolicy": "never",
+        "ephemeral": False,
+        "permissions": "development-profile",
+        "prompt": None,
+        "title": None,
+    }
+    fresh, receipt = ledger.begin("explicit-approval", "create_thread", old_params)
+    assert fresh
+    receipt.update(
+        status="accepted",
+        requestedPermissions={
+            "profile": "development-profile",
+            "sandbox": None,
+            "sandboxPolicy": None,
+            "approvalPolicy": "never",
+            "approvalsReviewer": "auto_review",
+        },
+    )
+    ledger.save(receipt)
+    rpc = AppServer(socket, timeout=1)
+    bridge = Bridge(rpc, ledger)
+    try:
+        with pytest.raises(ValueError, match="different arguments"):
+            await bridge.create_thread(
+                "explicit-approval",
+                str(tmp_path),
+                permissions="development-profile",
+                **changed_approval,
+            )
+        assert fake.count("permissionProfile/list") == 0
+        assert fake.count("thread/start") == 0
+    finally:
+        await rpc.close()
+        ledger.close()
+
+
 async def test_profile_contract_represents_repository_metadata_access(
     configured_bridge, fake_server, tmp_path
 ):

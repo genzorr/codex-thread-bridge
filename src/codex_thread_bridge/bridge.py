@@ -311,7 +311,6 @@ class Bridge:
             return {**resolved_request_params, "cwd": str(Path(cwd).resolve())}
 
         def compatible_params(receipt):
-            candidates = [resolved_request_params]
             requested = receipt.get("requestedPermissions")
             if not isinstance(requested, dict):
                 creation = receipt.get("creation", {})
@@ -328,31 +327,31 @@ class Bridge:
                     "approvalPolicy": creation.get("approvalPolicy", "never"),
                     "approvalsReviewer": creation.get("approvalsReviewer", "auto_review"),
                 }
-            previous = {
-                key: value
-                for key, value in resolved_request_params.items()
-                if key
-                not in {
-                    "permissions",
-                    "sandbox",
-                    "approvalPolicy",
-                    "approvalsReviewer",
-                    "sandbox_policy",
-                    "approvals_reviewer",
-                }
-            }
-            previous["approvalPolicy"] = requested.get("approvalPolicy", "never")
-            if requested.get("profile") is not None:
-                previous["permissions"] = requested["profile"]
-            else:
-                previous["sandbox"] = requested.get("sandbox", "read-only")
-            if previous["approvalPolicy"] != "never" or requested.get("sandboxPolicy") is not None:
+            previous = dict(resolved_request_params)
+            if permissions is None and not explicit_legacy:
+                previous.pop("permissions", None)
+                previous.pop("sandbox", None)
+                if requested.get("profile") is not None:
+                    previous["permissions"] = requested["profile"]
+                else:
+                    previous["sandbox"] = requested.get("sandbox") or "read-only"
+            if caller_approval_policy is None:
+                previous["approvalPolicy"] = requested.get("approvalPolicy", "never")
+            previous.pop("approvalsReviewer", None)
+            previous.pop("approvals_reviewer", None)
+            if caller_approvals_reviewer is not None:
+                # Old never-policy fingerprints omitted the reviewer. Keeping an explicitly
+                # supplied reviewer here makes that ambiguous legacy case conflict safely.
+                previous["approvalsReviewer"] = approvals_reviewer
+            elif previous["approvalPolicy"] != "never" or sandbox_policy is not None:
                 previous["approvalsReviewer"] = requested.get("approvalsReviewer", "auto_review")
-            if requested.get("sandboxPolicy") is not None:
-                previous["sandbox_policy"] = requested["sandboxPolicy"]
-                previous["approvals_reviewer"] = requested.get("approvalsReviewer", "auto_review")
-            candidates.append(previous)
-            return candidates
+            if sandbox_policy is not None:
+                previous["approvals_reviewer"] = (
+                    approvals_reviewer
+                    if caller_approvals_reviewer is not None
+                    else requested.get("approvalsReviewer", "auto_review")
+                )
+            return [previous]
 
         def validate_fresh():
             nonlocal validated_cwd
