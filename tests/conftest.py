@@ -19,6 +19,11 @@ class FakeServer:
         self.reject = {}
         self.drop_after = None
         self.override_creation = {}
+        self.permission_profiles = [
+            {"id": ":read-only", "description": None, "allowed": True},
+            {"id": ":workspace", "description": None, "allowed": True},
+            {"id": "development-profile", "description": "Local development", "allowed": True},
+        ]
         self.approval_policy = "never"
         self.complete_turns = True
         self.goal = None
@@ -70,14 +75,31 @@ class FakeServer:
                     "runtimeWorkspaceRoots": params.get("runtimeWorkspaceRoots", [params["cwd"]]),
                     "approvalPolicy": params.get("approvalPolicy", "never"),
                     "approvalsReviewer": params.get("approvalsReviewer", "user"),
-                    "sandbox": {
-                        "type": {
-                            "read-only": "readOnly",
-                            "workspace-write": "workspaceWrite",
-                            "danger-full-access": "dangerFullAccess",
-                        }[params["sandbox"]],
-                        **({"networkAccess": False} if params["sandbox"] == "read-only" else {}),
-                    },
+                    "sandbox": (
+                        {
+                            "type": "workspaceWrite",
+                            "writableRoots": [params["cwd"]],
+                            "networkAccess": True,
+                            "excludeTmpdirEnvVar": False,
+                            "excludeSlashTmp": False,
+                        }
+                        if "permissions" in params
+                        else {
+                            "type": {
+                                "read-only": "readOnly",
+                                "workspace-write": "workspaceWrite",
+                                "danger-full-access": "dangerFullAccess",
+                            }[params["sandbox"]],
+                            **(
+                                {"networkAccess": False} if params["sandbox"] == "read-only" else {}
+                            ),
+                        }
+                    ),
+                    **(
+                        {"activePermissionProfile": {"id": params["permissions"]}}
+                        if "permissions" in params
+                        else {}
+                    ),
                     "model": params.get("model", "configured-default"),
                     "reasoningEffort": params.get("config", {}).get(
                         "model_reasoning_effort", "medium"
@@ -100,6 +122,8 @@ class FakeServer:
                 result = {}
             elif method == "config/mcpServer/reload":
                 result = {}
+            elif method == "permissionProfile/list":
+                result = {"data": self.permission_profiles, "nextCursor": None}
             elif method == "turn/start":
                 thread = self.threads[params["threadId"]]
                 turn = {

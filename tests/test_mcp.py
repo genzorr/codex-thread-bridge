@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 
 from mcp import ClientSession, StdioServerParameters
@@ -139,6 +140,87 @@ async def test_real_mcp_stdio_discovery_create_read_and_dedup(fake_server, tmp_p
         assert invalid.isError
     assert fake.count("thread/start") == 1 and fake.count("turn/start") == 2
     assert fake.count("turn/steer") == 1
+
+
+async def test_mcp_server_creation_defaults_select_named_permissions(fake_server, tmp_path):
+    fake, socket = fake_server
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=[
+            "-m",
+            "codex_thread_bridge.server",
+            "--socket",
+            str(socket),
+            "--state-dir",
+            str(tmp_path / "state"),
+            "--default-permissions",
+            "development-profile",
+            "--default-approval-policy",
+            "on-request",
+            "--default-approvals-reviewer",
+            "auto_review",
+        ],
+        env={
+            **os.environ,
+            "CODEX_THREAD_BRIDGE_DEFAULT_PERMISSIONS": "unavailable-profile",
+            "CODEX_THREAD_BRIDGE_DEFAULT_APPROVAL_POLICY": "never",
+            "CODEX_THREAD_BRIDGE_DEFAULT_APPROVALS_REVIEWER": "user",
+        },
+    )
+    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        await session.initialize()
+        tools = (await session.list_tools()).tools
+        schema = next(tool for tool in tools if tool.name == "create_thread").inputSchema
+        assert "permissions" in schema["properties"]
+        assert "permissions" not in schema.get("required", [])
+        assert "sandbox" not in schema.get("required", [])
+        result = await session.call_tool(
+            "create_thread", {"request_id": "default-profile", "cwd": str(tmp_path)}
+        )
+        assert not result.isError
+        assert result.structuredContent["effectivePermissions"]["profile"] == {
+            "id": "development-profile"
+        }
+    start = next(params for method, params in fake.calls if method == "thread/start")
+    assert start["permissions"] == "development-profile"
+    assert start["approvalPolicy"] == "on-request"
+    assert start["approvalsReviewer"] == "auto_review"
+    assert "sandbox" not in start
+
+
+async def test_mcp_server_environment_defaults_select_named_permissions(fake_server, tmp_path):
+    fake, socket = fake_server
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=[
+            "-m",
+            "codex_thread_bridge.server",
+            "--socket",
+            str(socket),
+            "--state-dir",
+            str(tmp_path / "state"),
+        ],
+        env={
+            **os.environ,
+            "CODEX_THREAD_BRIDGE_DEFAULT_PERMISSIONS": "development-profile",
+            "CODEX_THREAD_BRIDGE_DEFAULT_APPROVAL_POLICY": "on-request",
+            "CODEX_THREAD_BRIDGE_DEFAULT_APPROVALS_REVIEWER": "auto_review",
+        },
+    )
+    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        await session.initialize()
+        result = await session.call_tool(
+            "create_thread", {"request_id": "environment-profile", "cwd": str(tmp_path)}
+        )
+        assert not result.isError
+        assert result.structuredContent["effectivePermissions"]["profile"] == {
+            "id": "development-profile"
+        }
+    start = next(params for method, params in fake.calls if method == "thread/start")
+    assert start["permissions"] == "development-profile"
+    assert start["approvalPolicy"] == "on-request"
+    assert start["approvalsReviewer"] == "auto_review"
+    assert "sandbox" not in start
 
 
 async def test_mcp_socket_alias_restart_does_not_repeat_creation(fake_server, tmp_path):

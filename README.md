@@ -37,6 +37,22 @@ Equivalent entry in that host's `~/.codex/config.toml`:
 [mcp_servers.codex-thread-bridge]
 command = "/absolute/path/codex-thread-bridge/.venv/bin/codex-thread-bridge"
 tool_timeout_sec = 60
+args = [
+  "--default-permissions", "your-local-profile",
+  "--default-approval-policy", "on-request",
+  "--default-approvals-reviewer", "auto_review",
+]
+```
+
+The three default flags are optional installation policy. The generic bridge does not assume a personal profile name. Without them, omitted creation arguments retain the conservative legacy behavior: read-only sandbox and approval policy `never`. An `on-request` default requires `auto_review`; the bridge never answers approval requests itself.
+
+The same defaults can be supplied through the stdio MCP server environment. Command-line flags take precedence over these variables:
+
+```toml
+[mcp_servers.codex-thread-bridge.env]
+CODEX_THREAD_BRIDGE_DEFAULT_PERMISSIONS = "your-local-profile"
+CODEX_THREAD_BRIDGE_DEFAULT_APPROVAL_POLICY = "on-request"
+CODEX_THREAD_BRIDGE_DEFAULT_APPROVALS_REVIEWER = "auto_review"
 ```
 
 After bridge code or MCP configuration changes, request a reload from this checkout with `uv run --locked codex-thread-bridge-reload`. The command displays the target App Server socket and asks for `y/N` confirmation before sending anything; pass `--socket /absolute/path/to/socket` if you use a nondefault socket. An accepted response means App Server queued a refresh for loaded tasks, not that every current task has already received the new tool schema. Start a fresh SSH-backed task and check its MCP tool inventory before a live test. The command does not restart the App Server.
@@ -53,6 +69,7 @@ API key is needed; the existing App Server owns its authentication and model usa
 | `get_capabilities` | Connect and report server identity and bridge limitations |
 | `create_thread` | Create one durable session in an existing directory; optionally name it and send its initial prompt |
 | `create_worktree_thread` | Create a locked, retained bridge-managed Git worktree at an explicit commit and start a task; no Desktop-managed lifecycle |
+| `update_thread_permissions` | Apply one explicit legacy sandbox policy to an idle task; named-profile changes require relaunch |
 | `send_message_to_thread` | Resume an explicitly selected idle thread without configuration overrides, then send one message |
 | `steer_thread` | Append a message to one active turn with an exact turn ID precondition; does not resume or change settings |
 | `list_threads` | Read a page of unarchived backend thread summaries |
@@ -79,12 +96,11 @@ Example tool arguments (these are MCP calls, not shell commands):
   "request_id": "demo-create-001",
   "cwd": "/absolute/path/to/project",
   "title": "Bridge validation",
-  "sandbox": "read-only",
   "prompt": "Do not use tools or edit files. Reply exactly: BRIDGE_READY"
 }
 ```
 
-Pass that object to `create_thread`. Keep the returned `threadId` and `turnId`;
+Pass that object to `create_thread` when the bridge installation configures a named permission profile. To select a profile per call, add `"permissions": "profile-name"`. Keep the returned `threadId` and `turnId`;
 use them with `wait_thread`. After checking the session in Desktop, use
 `send_message_to_thread` with a **new** request ID for the intentional follow-up:
 
@@ -109,12 +125,7 @@ To steer a task while its turn is active, obtain that task's current turn ID fro
 
 The App Server rejects the request if the turn has finished or another turn is active. An accepted receipt confirms dispatch to that turn, not that the agent has processed the message. Reuse the same request ID and inspect `get_operation` if the outcome is uncertain; do not send a new request ID to retry blindly.
 
-Creation defaults to `read-only` and approval policy `never`; explicit execution settings are documented below. `workspace-write`
-and `danger-full-access` are explicit options; obtain authorization for the
-chosen environment before calling. Omitted model/reasoning use the server's
-configured defaults. Initial dispatch is withheld if the returned cwd, sandbox
-kind, or approval policy differs from the request. Compare the full returned
-permission profile before sending further instructions.
+Creation uses installation defaults when configured and otherwise defaults to `read-only` with approval policy `never`; explicit execution settings are documented below. Ordinary task creation should omit legacy `sandbox` arguments and use the configured named profile. Explicit `workspace-write`, `read-only`, and `danger-full-access` remain available for deliberately restricted or legacy-compatible tasks; obtain authorization for the chosen environment before calling. Omitted model/reasoning use the App Server's configured defaults. Initial dispatch is withheld if the returned cwd, permission profile, sandbox kind, or approval settings differ from the request. Compare the full returned permission receipt before sending further instructions.
 
 ## Delivery and recovery
 
@@ -274,7 +285,13 @@ Independent project, not affiliated with or endorsed by OpenAI. MIT licensed.
 
 ## Explicit execution permissions
 
+`create_thread` accepts a named App Server permission profile in `permissions`. Before creating a task, the bridge calls `permissionProfile/list` with the resolved target `cwd` and rejects a missing or managed-disallowed profile. It sends `permissions` instead of legacy `sandbox`, records the requested profile and effective `activePermissionProfile`, and withholds the initial prompt if the returned profile or approval settings differ. Named profiles are a beta App Server field and require the bridge's existing `experimentalApi` opt-in.
+
+Do not combine explicit `permissions` with `sandbox` or `sandbox_policy`. When an installation has a default named profile, an explicit legacy `sandbox` deliberately overrides that default for the one creation. `create_worktree_thread` retains its existing explicit legacy sandbox contract.
+
 `update_thread_permissions` applies one user-authorized, complete `sandbox_policy` through `thread/settings/update`. Supply the exact current `expected_identity` fields (`thread_id`, `cwd`, `model`, `reasoning_effort`), plus `approval_policy` and `approvals_reviewer`. The task must be idle. The bridge records before/after settings, verifies permissions and identity/workspace-root preservation, and never starts a turn as part of an update. A concurrent external client can race the final idle check; coordinate task ownership while updating. There is no atomic App Server idle compare-and-set.
+
+The current App Server protocol exposes named profiles for thread creation but not as a typed `thread/settings/update` request. The bridge therefore does not emulate a named-profile update with a broad legacy sandbox. Relaunch an incorrectly created task with `permissions` instead.
 
 Existing-directory `create_thread` accepts `sandbox_policy` with its matching `sandbox` kind and verifies the complete effective policy before the initial prompt. Defaults remain read-only and approval `never`. Explicit `on-request` requires `approvals_reviewer="auto_review"`, so the App Server owns escalation review. Optional `model` and `reasoning_effort` select the creation profile; explicit values are checked against the returned settings before any initial prompt is sent. A mismatch retains the task ID in the failed receipt without dispatching work. Omitted fields preserve configured defaults. Messaging carries no settings overrides and accepts `never` or `on-request` with Auto-review; human/client-side approvals remain unsupported and are never silently approved. This does not promise approval of every requested action.
 

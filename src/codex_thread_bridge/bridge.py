@@ -87,9 +87,25 @@ def clipped(value, limit: int, *, display_text: bool = False):
 
 
 class Bridge:
-    def __init__(self, rpc: AppServer, ledger: Ledger):
+    def __init__(
+        self,
+        rpc: AppServer,
+        ledger: Ledger,
+        *,
+        default_permissions: str | None = None,
+        default_approval_policy: str | None = None,
+        default_approvals_reviewer: str | None = None,
+    ):
+        if default_permissions is not None:
+            nonempty(default_permissions, "default_permissions", 128)
+        validate_execution_policy(
+            default_approval_policy or "never", default_approvals_reviewer or "auto_review"
+        )
         self.rpc = rpc
         self.ledger = ledger
+        self.default_permissions = default_permissions
+        self.default_approval_policy = default_approval_policy
+        self.default_approvals_reviewer = default_approvals_reviewer
         self._mutation_lock = asyncio.Lock()
 
     async def capabilities(self):
@@ -109,6 +125,8 @@ class Bridge:
                 "bridgeManagedWorktrees": True,
                 "desktopProjectRegistry": False,
                 "clientSideToolsAndApprovals": False,
+                "namedPermissionProfiles": True,
+                "namedPermissionProfileUpdates": False,
             },
             "desktopVisibility": "Observed on Codex 0.153.4 with an existing project checkout; "
             "verify actual Desktop listing for each launch. Backend project IDs are separate.",
@@ -148,15 +166,39 @@ class Bridge:
         cwd: str,
         prompt: str | None = None,
         title: str | None = None,
-        sandbox: str = "read-only",
+        sandbox: str | None = None,
         model: str | None = None,
         app_server_project_id: str | None = None,
         sandbox_policy: dict | None = None,
-        approval_policy: str = "never",
-        approvals_reviewer: str = "auto_review",
+        approval_policy: str | None = None,
+        approvals_reviewer: str | None = None,
         reasoning_effort: str | None = None,
+        permissions: str | None = None,
     ):
+        explicit_legacy = sandbox is not None or sandbox_policy is not None
+        if permissions is not None and explicit_legacy:
+            raise ValueError("permissions cannot be combined with sandbox or sandbox_policy")
+        resolved_permissions = (
+            None
+            if explicit_legacy
+            else permissions
+            if permissions is not None
+            else self.default_permissions
+        )
+        resolved_sandbox = None if resolved_permissions is not None else sandbox or "read-only"
+        approval_policy = (
+            approval_policy
+            if approval_policy is not None
+            else self.default_approval_policy or "never"
+        )
+        approvals_reviewer = (
+            approvals_reviewer
+            if approvals_reviewer is not None
+            else self.default_approvals_reviewer or "auto_review"
+        )
         validate_execution_policy(approval_policy, approvals_reviewer)
+        if resolved_permissions is not None:
+            nonempty(resolved_permissions, "permissions", 128)
         if reasoning_effort is not None:
             nonempty(reasoning_effort, "reasoning_effort", 128)
         if sandbox_policy is not None:
@@ -165,19 +207,27 @@ class Bridge:
                 "read-only": "readOnly",
                 "workspace-write": "workspaceWrite",
                 "danger-full-access": "dangerFullAccess",
-            }.get(sandbox):
+            }.get(resolved_sandbox):
                 raise ValueError("sandbox and sandbox_policy.type must agree")
         nonempty(cwd, "cwd")
         if not Path(cwd).is_absolute():
             raise ValueError("cwd must be an existing absolute directory on the App Server host")
-        if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
+        if resolved_sandbox is not None and resolved_sandbox not in {
+            "read-only",
+            "workspace-write",
+            "danger-full-access",
+        }:
             raise ValueError("Unsupported sandbox")
         for name, value in [("prompt", prompt), ("title", title), ("model", model)]:
             if value is not None:
                 nonempty(value, name, 100_000 if name == "prompt" else 500)
-        params = {"cwd": cwd, "sandbox": sandbox, "approvalPolicy": "never", "ephemeral": False}
+        params = {"cwd": cwd, "approvalPolicy": approval_policy, "ephemeral": False}
+        if resolved_permissions is not None:
+            params["permissions"] = resolved_permissions
+        else:
+            params["sandbox"] = resolved_sandbox
         if approval_policy != "never":
-            params.update(approvalPolicy=approval_policy, approvalsReviewer=approvals_reviewer)
+            params["approvalsReviewer"] = approvals_reviewer
         if model is not None:
             params["model"] = model
         if app_server_project_id is not None:
@@ -212,33 +262,78 @@ class Bridge:
                 sandbox_policy=sandbox_policy, approvals_reviewer=approvals_reviewer
             )
 
+        requested_permissions = {
+            "profile": resolved_permissions,
+            "sandbox": resolved_sandbox,
+            "sandboxPolicy": sandbox_policy,
+            "approvalPolicy": approval_policy,
+            "approvalsReviewer": approvals_reviewer,
+        }
+        validated_cwd: str | None = None
+
         def legacy_params():
             # Old receipts hashed a resolved cwd; only legacy lookups may use this form.
             return {**request_params, "cwd": str(Path(cwd).resolve())}
 
         def validate_fresh():
+            nonlocal validated_cwd
             # The fingerprint uses the supplied path, not mutable symlink resolution.
-            launch_params["cwd"] = absolute_directory(cwd)
+            validated_cwd = absolute_directory(cwd)
+            launch_params["cwd"] = validated_cwd
             if sandbox_policy is not None:
                 validate_workspace_roots(sandbox_policy)
 
         async def action(receipt):
+            assert validated_cwd is not None
+            receipt["requestedPermissions"] = requested_permissions
+            self.ledger.save(receipt)
             if app_server_project_id is not None:
                 await self.rpc.call("project/read", {"projectId": app_server_project_id})
+            if resolved_permissions is not None:
+                profile = await self._permission_profile(validated_cwd, resolved_permissions)
+                receipt["permissionProfileValidation"] = profile
+                self.ledger.save(receipt)
+                if profile.get("allowed") is not True:
+                    raise RpcError(
+                        "permissionProfile/list",
+                        {
+                            "code": "permission_profile_disallowed",
+                            "message": f"Permission profile is not allowed: {resolved_permissions}",
+                        },
+                    )
             created = await self.rpc.call("thread/start", launch_params)
             thread_id = created["thread"]["id"]
-            receipt.update(threadId=thread_id, creation=created)
+            effective_permissions = {
+                "profile": created.get("activePermissionProfile"),
+                "sandbox": created.get("sandbox"),
+                "approvalPolicy": created.get("approvalPolicy"),
+                "approvalsReviewer": created.get("approvalsReviewer"),
+            }
+            active_profile = created.get("activePermissionProfile")
+            active_profile_id = (
+                active_profile.get("id") if isinstance(active_profile, dict) else None
+            )
+            receipt.update(
+                threadId=thread_id,
+                creation=created,
+                effectivePermissions=effective_permissions,
+            )
             self.ledger.save(receipt)  # Retain the ID even if naming or the first turn fails.
             actual = created.get("sandbox", {}).get("type")
-            expected = {
-                "read-only": "readOnly",
-                "workspace-write": "workspaceWrite",
-                "danger-full-access": "dangerFullAccess",
-            }[sandbox]
+            expected = (
+                {
+                    "read-only": "readOnly",
+                    "workspace-write": "workspaceWrite",
+                    "danger-full-access": "dangerFullAccess",
+                }[resolved_sandbox]
+                if resolved_sandbox is not None
+                else None
+            )
             if (
-                created.get("cwd") != launch_params["cwd"]
+                created.get("cwd") != validated_cwd
                 or created.get("approvalPolicy") != approval_policy
-                or actual != expected
+                or (expected is not None and actual != expected)
+                or (resolved_permissions is not None and active_profile_id != resolved_permissions)
                 or (model is not None and created.get("model") != model)
                 or (
                     reasoning_effort is not None
@@ -291,6 +386,36 @@ class Bridge:
             validate_fresh=validate_fresh,
             legacy_params=legacy_params,
         )
+
+    async def _permission_profile(self, cwd: str, profile_id: str):
+        cursor = None
+        seen = set()
+        while True:
+            params = {"cwd": cwd, "limit": 100}
+            if cursor is not None:
+                params["cursor"] = cursor
+            page = await self.rpc.call("permissionProfile/list", params)
+            for profile in page.get("data", []):
+                if profile.get("id") == profile_id:
+                    return profile
+            cursor = page.get("nextCursor")
+            if cursor is None:
+                raise RpcError(
+                    "permissionProfile/list",
+                    {
+                        "code": "permission_profile_unavailable",
+                        "message": f"Permission profile is unavailable for cwd: {profile_id}",
+                    },
+                )
+            if not isinstance(cursor, str) or cursor in seen:
+                raise RpcError(
+                    "permissionProfile/list",
+                    {
+                        "code": "invalid_permission_profile_cursor",
+                        "message": "Permission profile listing returned an invalid cursor",
+                    },
+                )
+            seen.add(cursor)
 
     async def create_worktree_thread(
         self,

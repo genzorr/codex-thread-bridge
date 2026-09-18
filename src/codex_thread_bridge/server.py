@@ -16,6 +16,9 @@ from .rpc import AppServer
 
 READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
 WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=True)
+DEFAULT_PERMISSIONS_ENV = "CODEX_THREAD_BRIDGE_DEFAULT_PERMISSIONS"
+DEFAULT_APPROVAL_POLICY_ENV = "CODEX_THREAD_BRIDGE_DEFAULT_APPROVAL_POLICY"
+DEFAULT_APPROVALS_REVIEWER_ENV = "CODEX_THREAD_BRIDGE_DEFAULT_APPROVALS_REVIEWER"
 
 
 def make_server(bridge: Bridge):
@@ -52,18 +55,22 @@ def make_server(bridge: Bridge):
         cwd: str,
         prompt: str | None = None,
         title: str | None = None,
-        sandbox: Literal["read-only", "workspace-write", "danger-full-access"] = "read-only",
+        sandbox: Literal["read-only", "workspace-write", "danger-full-access"] | None = None,
+        permissions: str | None = None,
         model: str | None = None,
         app_server_project_id: str | None = None,
         sandbox_policy: dict[str, Any] | None = None,
-        approval_policy: Literal["never", "on-request"] = "never",
-        approvals_reviewer: Literal["user", "auto_review"] = "auto_review",
+        approval_policy: Literal["never", "on-request"] | None = None,
+        approvals_reviewer: Literal["user", "auto_review"] | None = None,
         reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         """Create a retained session in an existing cwd, optionally with an initial prompt.
 
         Requires approval of this action and sandbox. No worktree or persistent Goal is created.
-        Approval defaults to never; on-request requires App Server Auto-review.
+        Ordinary creation should omit legacy sandbox arguments and use the configured named
+        permission profile. Explicit sandbox remains available for deliberately restricted tasks.
+        Named permissions cannot be combined with sandbox or sandbox_policy. Approval defaults
+        come from the bridge installation; without configured defaults they remain conservative.
         Explicit sandbox_policy is verified before dispatch. Supply only an
         App Server project ID, never assume a Desktop saved-project ID is interchangeable.
         Returns actual settings and IDs; verify Desktop association separately. Reusing request_id
@@ -71,17 +78,18 @@ def make_server(bridge: Bridge):
         Explicit model and reasoning_effort are verified before dispatching the initial prompt.
         """
         return await bridge.create_thread(
-            request_id,
-            cwd,
-            prompt,
-            title,
-            sandbox,
-            model,
-            app_server_project_id,
-            sandbox_policy,
-            approval_policy,
-            approvals_reviewer,
-            reasoning_effort,
+            request_id=request_id,
+            cwd=cwd,
+            prompt=prompt,
+            title=title,
+            sandbox=sandbox,
+            model=model,
+            app_server_project_id=app_server_project_id,
+            sandbox_policy=sandbox_policy,
+            approval_policy=approval_policy,
+            approvals_reviewer=approvals_reviewer,
+            reasoning_effort=reasoning_effort,
+            permissions=permissions,
         )
 
     @mcp.tool(annotations=WRITE)
@@ -244,9 +252,32 @@ def main():
         default=state_home / "codex-thread-bridge",
         help="Private durable operation ledger (keep across restarts)",
     )
+    parser.add_argument(
+        "--default-permissions",
+        default=os.environ.get(DEFAULT_PERMISSIONS_ENV),
+        help="Named App Server permission profile for create_thread when callers omit permissions",
+    )
+    parser.add_argument(
+        "--default-approval-policy",
+        choices=("never", "on-request"),
+        default=os.environ.get(DEFAULT_APPROVAL_POLICY_ENV),
+        help="Approval policy for create_thread when callers omit approval_policy",
+    )
+    parser.add_argument(
+        "--default-approvals-reviewer",
+        choices=("user", "auto_review"),
+        default=os.environ.get(DEFAULT_APPROVALS_REVIEWER_ENV),
+        help="Approval reviewer for create_thread when callers omit approvals_reviewer",
+    )
     args = parser.parse_args()
     socket_path, ledger = open_endpoint_ledger(args.socket, args.state_dir)
-    bridge = Bridge(AppServer(socket_path), ledger)
+    bridge = Bridge(
+        AppServer(socket_path),
+        ledger,
+        default_permissions=args.default_permissions,
+        default_approval_policy=args.default_approval_policy,
+        default_approvals_reviewer=args.default_approvals_reviewer,
+    )
     make_server(bridge).run(transport="stdio")
 
 
