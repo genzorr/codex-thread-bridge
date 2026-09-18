@@ -84,8 +84,15 @@ async def test_real_mcp_stdio_discovery_create_read_and_dedup(fake_server, tmp_p
         assert not caps.isError
         assert caps.structuredContent["capabilities"]["desktopManagedWorktrees"] is False
         assert caps.structuredContent["capabilities"]["steerActiveTurn"] is True
+        assert caps.structuredContent["capabilities"]["namedPermissionProfileUpdates"] is True
         create_schema = next(tool for tool in tools if tool.name == "create_thread").inputSchema
         assert "reasoning_effort" in create_schema["properties"]
+        update_schema = next(
+            tool for tool in tools if tool.name == "update_thread_permissions"
+        ).inputSchema
+        assert "permissions" in update_schema["properties"]
+        assert "permissions" not in update_schema.get("required", [])
+        assert "sandbox_policy" not in update_schema.get("required", [])
         args = {
             "request_id": "mcp-create",
             "cwd": str(tmp_path),

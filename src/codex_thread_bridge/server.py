@@ -139,25 +139,29 @@ def make_server(bridge: Bridge):
     async def update_thread_permissions(
         request_id: str,
         thread_id: str,
-        sandbox_policy: dict[str, Any],
         expected_identity: dict[str, Any],
+        sandbox_policy: dict[str, Any] | None = None,
+        permissions: str | None = None,
         approval_policy: Literal["never", "on-request"] = "never",
         approvals_reviewer: Literal["user", "auto_review"] = "auto_review",
     ) -> dict[str, Any]:
         """Apply explicitly authorized permissions to one idle task with before/after receipts.
 
         expected_identity contains thread_id, cwd, model and reasoning_effort from current state.
-        Uses thread/settings/update without model, effort or cwd overrides. Does not start a turn,
+        Select exactly one named permissions profile or complete legacy sandbox_policy. Named
+        profiles are validated for the task cwd and cannot be combined with sandbox_policy. Uses
+        thread/settings/update without model, effort or cwd overrides. Does not start a turn,
         interrupt, change global settings, or retry unknown outcomes. External clients can race
         the idle check; coordinate ownership during the update. Reuse request_id for its receipt.
         """
         return await bridge.update_thread_permissions(
-            request_id,
-            thread_id,
-            sandbox_policy,
-            expected_identity,
-            approval_policy,
-            approvals_reviewer,
+            request_id=request_id,
+            thread_id=thread_id,
+            sandbox_policy=sandbox_policy,
+            expected_identity=expected_identity,
+            approval_policy=approval_policy,
+            approvals_reviewer=approvals_reviewer,
+            permissions=permissions,
         )
 
     @mcp.tool(annotations=WRITE)

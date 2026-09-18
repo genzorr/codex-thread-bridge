@@ -126,23 +126,43 @@ class Bridge:
                 "desktopProjectRegistry": False,
                 "clientSideToolsAndApprovals": False,
                 "namedPermissionProfiles": True,
-                "namedPermissionProfileUpdates": False,
+                "namedPermissionProfileUpdates": True,
             },
             "desktopVisibility": "Observed on Codex 0.153.4 with an existing project checkout; "
             "verify actual Desktop listing for each launch. Backend project IDs are separate.",
         }
 
     async def _mutate(
-        self, request_id, method, params, action, *, validate_fresh=None, legacy_params=None
+        self,
+        request_id,
+        method,
+        params,
+        action,
+        *,
+        validate_fresh=None,
+        legacy_params=None,
+        compatible_params=None,
+        fingerprint_version=2,
     ):
         async with self._mutation_lock:
-            retained = self.ledger.lookup(request_id, method, params, legacy_params=legacy_params)
+            retained = self.ledger.lookup(
+                request_id,
+                method,
+                params,
+                legacy_params=legacy_params,
+                compatible_params=compatible_params,
+            )
             if retained is not None:
                 return {**retained, "replayed": True}
             if validate_fresh is not None:
                 validate_fresh()
             fresh, receipt = self.ledger.begin(
-                request_id, method, params, legacy_params=legacy_params
+                request_id,
+                method,
+                params,
+                legacy_params=legacy_params,
+                compatible_params=compatible_params,
+                fingerprint_version=fingerprint_version,
             )
             if not fresh:
                 return {**receipt, "replayed": True}
@@ -175,6 +195,21 @@ class Bridge:
         reasoning_effort: str | None = None,
         permissions: str | None = None,
     ):
+        caller_approval_policy = approval_policy
+        caller_approvals_reviewer = approvals_reviewer
+        caller_params = {
+            "cwd": cwd,
+            "prompt": prompt,
+            "title": title,
+            "sandbox": sandbox,
+            "permissions": permissions,
+            "model": model,
+            "appServerProjectId": app_server_project_id,
+            "sandboxPolicy": sandbox_policy,
+            "approvalPolicy": caller_approval_policy,
+            "approvalsReviewer": caller_approvals_reviewer,
+            "reasoningEffort": reasoning_effort,
+        }
         explicit_legacy = sandbox is not None or sandbox_policy is not None
         if permissions is not None and explicit_legacy:
             raise ValueError("permissions cannot be combined with sandbox or sandbox_policy")
@@ -255,10 +290,10 @@ class Bridge:
         if config_overrides:
             params["config"] = config_overrides
         launch_params = dict(params)
-        request_params = {**params, "prompt": prompt, "title": title}
+        resolved_request_params = {**params, "prompt": prompt, "title": title}
         # Preserve retained fingerprints for calls using the original defaults.
         if sandbox_policy is not None:
-            request_params.update(
+            resolved_request_params.update(
                 sandbox_policy=sandbox_policy, approvals_reviewer=approvals_reviewer
             )
 
@@ -273,7 +308,51 @@ class Bridge:
 
         def legacy_params():
             # Old receipts hashed a resolved cwd; only legacy lookups may use this form.
-            return {**request_params, "cwd": str(Path(cwd).resolve())}
+            return {**resolved_request_params, "cwd": str(Path(cwd).resolve())}
+
+        def compatible_params(receipt):
+            candidates = [resolved_request_params]
+            requested = receipt.get("requestedPermissions")
+            if not isinstance(requested, dict):
+                creation = receipt.get("creation", {})
+                active = creation.get("activePermissionProfile")
+                sandbox_type = creation.get("sandbox", {}).get("type")
+                requested = {
+                    "profile": active.get("id") if isinstance(active, dict) else None,
+                    "sandbox": {
+                        "readOnly": "read-only",
+                        "workspaceWrite": "workspace-write",
+                        "dangerFullAccess": "danger-full-access",
+                    }.get(sandbox_type),
+                    "sandboxPolicy": sandbox_policy,
+                    "approvalPolicy": creation.get("approvalPolicy", "never"),
+                    "approvalsReviewer": creation.get("approvalsReviewer", "auto_review"),
+                }
+            previous = {
+                key: value
+                for key, value in resolved_request_params.items()
+                if key
+                not in {
+                    "permissions",
+                    "sandbox",
+                    "approvalPolicy",
+                    "approvalsReviewer",
+                    "sandbox_policy",
+                    "approvals_reviewer",
+                }
+            }
+            previous["approvalPolicy"] = requested.get("approvalPolicy", "never")
+            if requested.get("profile") is not None:
+                previous["permissions"] = requested["profile"]
+            else:
+                previous["sandbox"] = requested.get("sandbox", "read-only")
+            if previous["approvalPolicy"] != "never" or requested.get("sandboxPolicy") is not None:
+                previous["approvalsReviewer"] = requested.get("approvalsReviewer", "auto_review")
+            if requested.get("sandboxPolicy") is not None:
+                previous["sandbox_policy"] = requested["sandboxPolicy"]
+                previous["approvals_reviewer"] = requested.get("approvalsReviewer", "auto_review")
+            candidates.append(previous)
+            return candidates
 
         def validate_fresh():
             nonlocal validated_cwd
@@ -381,10 +460,12 @@ class Bridge:
         return await self._mutate(
             request_id,
             "create_thread",
-            request_params,
+            caller_params,
             action,
             validate_fresh=validate_fresh,
             legacy_params=legacy_params,
+            compatible_params=compatible_params,
+            fingerprint_version=3,
         )
 
     async def _permission_profile(self, cwd: str, profile_id: str):
@@ -615,6 +696,7 @@ class Bridge:
         receipt,
         thread_id,
         sandbox_policy,
+        permissions,
         approval_policy,
         approvals_reviewer,
         expected_identity,
@@ -630,6 +712,18 @@ class Bridge:
                     "message": "Task identity/settings differ; no update sent",
                 },
             )
+        if permissions is not None:
+            profile = await self._permission_profile(before["cwd"], permissions)
+            receipt["permissionProfileValidation"] = profile
+            self.ledger.save(receipt)
+            if profile.get("allowed") is not True:
+                raise RpcError(
+                    "permissionProfile/list",
+                    {
+                        "code": "permission_profile_disallowed",
+                        "message": f"Permission profile is not allowed: {permissions}",
+                    },
+                )
         state = (await self.rpc.call("thread/read", {"threadId": thread_id}))["thread"]
         if state.get("status", {}).get("type") != "idle":
             raise RpcError(
@@ -638,22 +732,29 @@ class Bridge:
             )
         receipt["permissionUpdateState"] = "outcome_unknown"
         self.ledger.save(receipt)
+        update_params = {
+            "threadId": thread_id,
+            "approvalPolicy": approval_policy,
+            "approvalsReviewer": approvals_reviewer,
+        }
+        if permissions is not None:
+            update_params["permissions"] = permissions
+        else:
+            update_params["sandboxPolicy"] = sandbox_policy
         await self.rpc.call(
             "thread/settings/update",
-            {
-                "threadId": thread_id,
-                "sandboxPolicy": sandbox_policy,
-                "approvalPolicy": approval_policy,
-                "approvalsReviewer": approvals_reviewer,
-            },
+            update_params,
         )
         after = await self.rpc.call("thread/resume", {"threadId": thread_id, "excludeTurns": True})
         receipt["permissionsAfter"] = after
         self.ledger.save(receipt)
+        active_profile = after.get("activePermissionProfile")
+        active_profile_id = active_profile.get("id") if isinstance(active_profile, dict) else None
         if (
             identity(after) != expected_identity
             or after.get("runtimeWorkspaceRoots") != before.get("runtimeWorkspaceRoots")
-            or after.get("sandbox") != sandbox_policy
+            or (permissions is None and after.get("sandbox") != sandbox_policy)
+            or (permissions is not None and active_profile_id != permissions)
             or after.get("approvalPolicy") != approval_policy
             or after.get("approvalsReviewer") != approvals_reviewer
         ):
@@ -670,16 +771,26 @@ class Bridge:
         self,
         request_id,
         thread_id,
-        sandbox_policy,
-        expected_identity,
+        sandbox_policy=None,
+        expected_identity=None,
         approval_policy="never",
         approvals_reviewer="auto_review",
+        permissions=None,
     ):
         nonempty(thread_id, "thread_id", 128)
-        validate_sandbox_policy(sandbox_policy)
+        if permissions is not None and sandbox_policy is not None:
+            raise ValueError("permissions cannot be combined with sandbox_policy")
+        if permissions is None and sandbox_policy is None:
+            raise ValueError("permissions or sandbox_policy is required")
+        if permissions is not None:
+            nonempty(permissions, "permissions", 128)
+        else:
+            assert sandbox_policy is not None
+            validate_sandbox_policy(sandbox_policy)
         validate_execution_policy(approval_policy, approvals_reviewer)
         if (
-            set(expected_identity) != {"thread_id", "cwd", "model", "reasoning_effort"}
+            not isinstance(expected_identity, dict)
+            or set(expected_identity) != {"thread_id", "cwd", "model", "reasoning_effort"}
             or expected_identity["thread_id"] != thread_id
         ):
             raise ValueError(
@@ -687,18 +798,29 @@ class Bridge:
             )
         params = {
             "threadId": thread_id,
-            "sandboxPolicy": sandbox_policy,
             "expectedIdentity": expected_identity,
             "approvalPolicy": approval_policy,
             "approvalsReviewer": approvals_reviewer,
         }
+        if permissions is not None:
+            params["permissions"] = permissions
+        else:
+            params["sandboxPolicy"] = sandbox_policy
 
         async def action(receipt):
             receipt["threadId"] = thread_id
+            receipt["requestedPermissions"] = {
+                "profile": permissions,
+                "sandboxPolicy": sandbox_policy,
+                "approvalPolicy": approval_policy,
+                "approvalsReviewer": approvals_reviewer,
+            }
+            self.ledger.save(receipt)
             await self._apply_permissions(
                 receipt,
                 thread_id,
                 sandbox_policy,
+                permissions,
                 approval_policy,
                 approvals_reviewer,
                 expected_identity,
@@ -709,7 +831,11 @@ class Bridge:
             "update_thread_permissions",
             params,
             action,
-            validate_fresh=lambda: validate_workspace_roots(sandbox_policy),
+            validate_fresh=(
+                (lambda: validate_workspace_roots(sandbox_policy))
+                if sandbox_policy is not None
+                else None
+            ),
         )
 
     async def send_message_to_thread(self, request_id: str, thread_id: str, message: str):

@@ -170,6 +170,81 @@ async def test_replay_retains_resolved_profile_without_resending(
     assert fake.count("thread/start") == 1
 
 
+async def test_omitted_creation_inputs_replay_across_changed_bridge_defaults(fake_server, tmp_path):
+    fake, socket = fake_server
+    ledger = Ledger(tmp_path / "reconfigured-state" / "operations.sqlite3")
+    first_rpc = AppServer(socket, timeout=1)
+    second_rpc = AppServer(socket, timeout=1)
+    first_bridge = Bridge(
+        first_rpc,
+        ledger,
+        default_permissions="development-profile",
+        default_approval_policy="on-request",
+        default_approvals_reviewer="auto_review",
+    )
+    second_bridge = Bridge(
+        second_rpc,
+        ledger,
+        default_permissions=":workspace",
+        default_approval_policy="never",
+        default_approvals_reviewer="user",
+    )
+    try:
+        first = await first_bridge.create_thread("stable-defaults", str(tmp_path))
+        replay = await second_bridge.create_thread("stable-defaults", str(tmp_path))
+        assert replay == {**first, "replayed": True}
+        assert replay["requestedPermissions"]["profile"] == "development-profile"
+        assert fake.count("permissionProfile/list") == 1
+        assert fake.count("thread/start") == 1
+    finally:
+        await first_rpc.close()
+        await second_rpc.close()
+        ledger.close()
+
+
+async def test_version_two_resolved_default_fingerprint_remains_replayable(fake_server, tmp_path):
+    fake, socket = fake_server
+    ledger = Ledger(tmp_path / "version-two-state" / "operations.sqlite3")
+    old_params = {
+        "cwd": str(tmp_path),
+        "approvalPolicy": "on-request",
+        "ephemeral": False,
+        "permissions": "development-profile",
+        "approvalsReviewer": "auto_review",
+        "prompt": None,
+        "title": None,
+    }
+    fresh, receipt = ledger.begin("old-defaults", "create_thread", old_params)
+    assert fresh
+    receipt.update(
+        status="accepted",
+        requestedPermissions={
+            "profile": "development-profile",
+            "sandbox": None,
+            "sandboxPolicy": None,
+            "approvalPolicy": "on-request",
+            "approvalsReviewer": "auto_review",
+        },
+    )
+    retained = ledger.save(receipt)
+    rpc = AppServer(socket, timeout=1)
+    bridge = Bridge(
+        rpc,
+        ledger,
+        default_permissions=":workspace",
+        default_approval_policy="never",
+        default_approvals_reviewer="user",
+    )
+    try:
+        replay = await bridge.create_thread("old-defaults", str(tmp_path))
+        assert replay == {**retained, "replayed": True}
+        assert fake.count("permissionProfile/list") == 0
+        assert fake.count("thread/start") == 0
+    finally:
+        await rpc.close()
+        ledger.close()
+
+
 async def test_profile_contract_represents_repository_metadata_access(
     configured_bridge, fake_server, tmp_path
 ):

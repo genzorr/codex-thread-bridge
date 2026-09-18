@@ -163,10 +163,20 @@ class FakeServer:
             elif method == "thread/settings/update":
                 settings = self.settings[params["threadId"]]
                 settings.update(
-                    sandbox=params["sandboxPolicy"],
                     approvalPolicy=params["approvalPolicy"],
                     approvalsReviewer=params["approvalsReviewer"],
                 )
+                if "permissions" in params:
+                    settings["activePermissionProfile"] = {"id": params["permissions"]}
+                    settings["sandbox"] = {
+                        "type": "workspaceWrite",
+                        "writableRoots": [settings["cwd"]],
+                        "networkAccess": True,
+                        "excludeTmpdirEnvVar": False,
+                        "excludeSlashTmp": False,
+                    }
+                else:
+                    settings["sandbox"] = params["sandboxPolicy"]
                 result = {}
             elif method == "thread/turns/list":
                 turns = list(reversed(self.threads[params["threadId"]]["turns"]))

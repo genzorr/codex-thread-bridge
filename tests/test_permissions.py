@@ -40,6 +40,97 @@ async def test_update_preserves_identity_and_messages_have_no_overrides(
     assert replay["replayed"] and fake.count("thread/settings/update") == 1
 
 
+async def test_named_update_validates_profile_and_verifies_effective_identity(
+    bridge, fake_server, tmp_path
+):
+    fake, _ = fake_server
+    tid, expected = await setup(bridge, tmp_path)
+    result = await bridge.update_thread_permissions(
+        "named-update",
+        tid,
+        expected_identity=expected,
+        permissions="development-profile",
+        approval_policy="on-request",
+    )
+    assert result["status"] == "accepted"
+    assert result["permissionUpdateState"] == "verified"
+    assert result["permissionProfileValidation"]["id"] == "development-profile"
+    assert result["requestedPermissions"] == {
+        "profile": "development-profile",
+        "sandboxPolicy": None,
+        "approvalPolicy": "on-request",
+        "approvalsReviewer": "auto_review",
+    }
+    assert identity(result["permissionsBefore"]) == expected
+    assert identity(result["permissionsAfter"]) == expected
+    assert result["permissionsAfter"]["activePermissionProfile"] == {"id": "development-profile"}
+    update = next(params for method, params in fake.calls if method == "thread/settings/update")
+    assert update == {
+        "threadId": tid,
+        "permissions": "development-profile",
+        "approvalPolicy": "on-request",
+        "approvalsReviewer": "auto_review",
+    }
+    methods = [method for method, _ in fake.calls]
+    assert methods.index("permissionProfile/list") < methods.index("thread/settings/update")
+
+
+async def test_named_update_rejects_legacy_policy_mix(bridge, fake_server, tmp_path):
+    fake, _ = fake_server
+    tid, expected = await setup(bridge, tmp_path)
+    before = list(fake.calls)
+    with pytest.raises(ValueError, match="cannot be combined"):
+        await bridge.update_thread_permissions(
+            "mixed-update",
+            tid,
+            sandbox_policy=POLICY,
+            expected_identity=expected,
+            permissions="development-profile",
+        )
+    assert fake.calls == before
+
+
+@pytest.mark.parametrize("profiles", [[], [{"id": "development-profile", "allowed": False}]])
+async def test_named_update_withholds_change_for_unavailable_or_disallowed_profile(
+    bridge, fake_server, tmp_path, profiles
+):
+    fake, _ = fake_server
+    tid, expected = await setup(bridge, tmp_path)
+    fake.permission_profiles = profiles
+    result = await bridge.update_thread_permissions(
+        "invalid-profile-update",
+        tid,
+        expected_identity=expected,
+        permissions="development-profile",
+    )
+    assert result["status"] == "failed"
+    assert fake.count("thread/settings/update") == 0
+
+
+async def test_named_update_effective_profile_mismatch_fails_verification(
+    bridge, fake_server, tmp_path, monkeypatch
+):
+    fake, _ = fake_server
+    tid, expected = await setup(bridge, tmp_path)
+    original = bridge.rpc.call
+
+    async def changed(method, params):
+        result = await original(method, params)
+        if method == "thread/settings/update":
+            fake.settings[tid]["activePermissionProfile"] = {"id": ":workspace"}
+        return result
+
+    monkeypatch.setattr(bridge.rpc, "call", changed)
+    result = await bridge.update_thread_permissions(
+        "mismatched-profile-update",
+        tid,
+        expected_identity=expected,
+        permissions="development-profile",
+    )
+    assert result["status"] == "failed"
+    assert result["permissionsAfter"]["activePermissionProfile"] == {"id": ":workspace"}
+
+
 @pytest.mark.parametrize("busy", [True, False])
 async def test_busy_or_changed_identity_never_updates(bridge, fake_server, tmp_path, busy):
     fake, _ = fake_server
