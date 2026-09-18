@@ -31,7 +31,15 @@ class Ledger:
             json.dumps([method, params], sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
 
-    def lookup(self, request_id: str, method: str, params: dict, *, legacy_params=None):
+    def lookup(
+        self,
+        request_id: str,
+        method: str,
+        params: dict,
+        *,
+        legacy_params=None,
+        compatible_params=None,
+    ):
         fingerprint = self._fingerprint(request_id, method, params)
         row = self.db.execute(
             "SELECT fingerprint, receipt FROM operations WHERE request_id = ?", (request_id,)
@@ -45,13 +53,30 @@ class Ledger:
                 and legacy_params is not None
                 and row[0] == self._fingerprint(request_id, method, legacy_params())
             )
-            if not legacy_match:
+            compatible_match = (
+                receipt.get("fingerprintVersion") == 2
+                and compatible_params is not None
+                and any(
+                    row[0] == self._fingerprint(request_id, method, candidate)
+                    for candidate in compatible_params(receipt)
+                )
+            )
+            if not legacy_match and not compatible_match:
                 raise ValueError(
                     "request_id already belongs to different arguments; no action taken"
                 )
         return receipt
 
-    def begin(self, request_id: str, method: str, params: dict, *, legacy_params=None):
+    def begin(
+        self,
+        request_id: str,
+        method: str,
+        params: dict,
+        *,
+        legacy_params=None,
+        compatible_params=None,
+        fingerprint_version=2,
+    ):
         fingerprint = self._fingerprint(request_id, method, params)
         receipt = {
             "requestId": request_id,
@@ -59,14 +84,20 @@ class Ledger:
             "status": "in_progress_or_unknown",
             "startedAt": time.time(),
             "retrySafe": False,
-            "fingerprintVersion": 2,
+            "fingerprintVersion": fingerprint_version,
         }
         with self.db:
             inserted = self.db.execute(
                 "INSERT OR IGNORE INTO operations VALUES (?, ?, ?)",
                 (request_id, fingerprint, json.dumps(receipt)),
             ).rowcount
-            existing = self.lookup(request_id, method, params, legacy_params=legacy_params)
+            existing = self.lookup(
+                request_id,
+                method,
+                params,
+                legacy_params=legacy_params,
+                compatible_params=compatible_params,
+            )
         return bool(inserted), existing
 
     def save(self, receipt: dict):

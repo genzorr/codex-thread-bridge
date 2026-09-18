@@ -97,7 +97,7 @@ class AppServer:
                 if not future.done():
                     future.set_exception(TransportError(failure))
 
-    async def _request(self, method: str, params: dict[str, Any]):
+    async def _request(self, method: str, params: dict[str, Any] | None):
         ws = self._ws
         if ws is None:
             raise TransportError("App Server is not connected")
@@ -120,7 +120,7 @@ class AppServer:
             raise TransportError(f"{method}: invalid response; outcome unknown")
         return message["result"]
 
-    async def call(self, method: str, params: dict[str, Any]):
+    async def call(self, method: str, params: dict[str, Any] | None):
         await self.connect()
         # Reconnect before a new request, never retry an already-sent request.
         return await self._request(method, params)

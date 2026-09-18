@@ -16,6 +16,9 @@ from .rpc import AppServer
 
 READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
 WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=True)
+DEFAULT_PERMISSIONS_ENV = "CODEX_THREAD_BRIDGE_DEFAULT_PERMISSIONS"
+DEFAULT_APPROVAL_POLICY_ENV = "CODEX_THREAD_BRIDGE_DEFAULT_APPROVAL_POLICY"
+DEFAULT_APPROVALS_REVIEWER_ENV = "CODEX_THREAD_BRIDGE_DEFAULT_APPROVALS_REVIEWER"
 
 
 def make_server(bridge: Bridge):
@@ -30,7 +33,7 @@ def make_server(bridge: Bridge):
     mcp = FastMCP(
         "codex-thread-bridge",
         instructions=(
-            "Create and message Codex sessions on this same host using its running App Server. "
+            "Create, message, and steer Codex sessions on this host using its App Server. "
             "Get user authorization before mutations. Use a stable request_id for each intended "
             "mutation; reuse it after an uncertain response and inspect get_operation. Never use "
             "a new ID to blindly retry. Accepted means dispatched, not completed. No automatic "
@@ -52,20 +55,41 @@ def make_server(bridge: Bridge):
         cwd: str,
         prompt: str | None = None,
         title: str | None = None,
-        sandbox: Literal["read-only", "workspace-write", "danger-full-access"] = "read-only",
+        sandbox: Literal["read-only", "workspace-write", "danger-full-access"] | None = None,
+        permissions: str | None = None,
         model: str | None = None,
         app_server_project_id: str | None = None,
+        sandbox_policy: dict[str, Any] | None = None,
+        approval_policy: Literal["never", "on-request"] | None = None,
+        approvals_reviewer: Literal["user", "auto_review"] | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         """Create a retained session in an existing cwd, optionally with an initial prompt.
 
         Requires approval of this action and sandbox. No worktree or persistent Goal is created.
-        Approval policy is never. Omitted model/reasoning use configured defaults. Supply only an
+        Ordinary creation should omit legacy sandbox arguments and use the configured named
+        permission profile. Explicit sandbox remains available for deliberately restricted tasks.
+        Named permissions cannot be combined with sandbox or sandbox_policy. Approval defaults
+        come from the bridge installation; without configured defaults they remain conservative.
+        Explicit sandbox_policy is verified before dispatch. Supply only an
         App Server project ID, never assume a Desktop saved-project ID is interchangeable.
         Returns actual settings and IDs; verify Desktop association separately. Reusing request_id
         returns its receipt without resending. A failed/unknown operation may have created a thread.
+        Explicit model and reasoning_effort are verified before dispatching the initial prompt.
         """
         return await bridge.create_thread(
-            request_id, cwd, prompt, title, sandbox, model, app_server_project_id
+            request_id=request_id,
+            cwd=cwd,
+            prompt=prompt,
+            title=title,
+            sandbox=sandbox,
+            model=model,
+            app_server_project_id=app_server_project_id,
+            sandbox_policy=sandbox_policy,
+            approval_policy=approval_policy,
+            approvals_reviewer=approvals_reviewer,
+            reasoning_effort=reasoning_effort,
+            permissions=permissions,
         )
 
     @mcp.tool(annotations=WRITE)
@@ -112,30 +136,83 @@ def make_server(bridge: Bridge):
         )
 
     @mcp.tool(annotations=WRITE)
+    async def update_thread_permissions(
+        request_id: str,
+        thread_id: str,
+        expected_identity: dict[str, Any],
+        sandbox_policy: dict[str, Any] | None = None,
+        permissions: str | None = None,
+        approval_policy: Literal["never", "on-request"] = "never",
+        approvals_reviewer: Literal["user", "auto_review"] = "auto_review",
+    ) -> dict[str, Any]:
+        """Apply explicitly authorized permissions to one idle task with before/after receipts.
+
+        expected_identity contains thread_id, cwd, model and reasoning_effort from current state.
+        Select exactly one named permissions profile or complete legacy sandbox_policy. Named
+        profiles are validated for the task cwd and cannot be combined with sandbox_policy. Uses
+        thread/settings/update without model, effort or cwd overrides. Does not start a turn,
+        interrupt, change global settings, or retry unknown outcomes. External clients can race
+        the idle check; coordinate ownership during the update. Reuse request_id for its receipt.
+        """
+        return await bridge.update_thread_permissions(
+            request_id=request_id,
+            thread_id=thread_id,
+            sandbox_policy=sandbox_policy,
+            expected_identity=expected_identity,
+            approval_policy=approval_policy,
+            approvals_reviewer=approvals_reviewer,
+            permissions=permissions,
+        )
+
+    @mcp.tool(annotations=WRITE)
     async def send_message_to_thread(
         request_id: str, thread_id: str, message: str
     ) -> dict[str, Any]:
         """Resume the explicitly selected idle session without overrides and send one message.
 
-        Requires user authorization. Refuses an active thread and an interactive approval policy.
+        Requires user authorization. Supports never or on-request with App Server Auto-review.
         Resume may load the session; its actual settings are returned. Does not steer, interrupt,
         set Goals, or retry delivery. Use a stable request_id; inspect get_operation on uncertainty.
         """
         return await bridge.send_message_to_thread(request_id, thread_id, message)
 
+    @mcp.tool(annotations=WRITE)
+    async def steer_thread(
+        request_id: str, thread_id: str, expected_turn_id: str, message: str
+    ) -> dict[str, Any]:
+        """Append a message to one active turn without changing task settings.
+
+        Args:
+            request_id: Stable ID for one authorized message; reuse after uncertainty.
+            thread_id: Explicit target task ID.
+            expected_turn_id: Active turn ID; stale or idle targets are rejected.
+            message: Text to append to the active turn.
+        Returns:
+            Receipt; accepted means queued by App Server, not yet processed by the agent.
+        """
+        return await bridge.steer_thread(request_id, thread_id, expected_turn_id, message)
+
     @mcp.tool(annotations=READ)
     async def list_threads(
-        cwd: str | None = None, limit: int = 20, cursor: str | None = None
+        cwd: str | None = None, limit: int = 20, cursor: str = ""
     ) -> dict[str, Any]:
-        """List unarchived backend threads without loading them. Project IDs are backend IDs."""
-        return await bridge.list_threads(cwd, limit, cursor)
+        """List unarchived backend threads without loading them. Omit cursor for the first page.
+
+        Project IDs are backend IDs. Pass a returned cursor as its exact string, not null.
+        """
+        return await bridge.list_threads(cwd, limit, cursor or None)
 
     @mcp.tool(annotations=READ)
     async def read_thread(
-        thread_id: str, limit: int = 10, cursor: str | None = None, max_text_chars: int = 4000
+        thread_id: str, limit: int = 10, cursor: str = "", max_text_chars: int = 4000
     ) -> dict[str, Any]:
-        """Read metadata and one newest-first turn page, without resuming; truncation is marked."""
-        return await bridge.read_thread(thread_id, limit, cursor, max_text_chars)
+        """Read metadata and one newest-first turn page, without resuming; truncation is marked.
+
+        Omit cursor for the first page; pass a returned cursor as its exact string, not null.
+        """
+        # FastMCP pre-parses JSON-shaped nullable strings. A plain str annotation
+        # preserves opaque JSON cursor bytes; the empty default means first page.
+        return await bridge.read_thread(thread_id, limit, cursor or None, max_text_chars)
 
     @mcp.tool(annotations=READ)
     async def wait_thread(
@@ -179,9 +256,32 @@ def main():
         default=state_home / "codex-thread-bridge",
         help="Private durable operation ledger (keep across restarts)",
     )
+    parser.add_argument(
+        "--default-permissions",
+        default=os.environ.get(DEFAULT_PERMISSIONS_ENV),
+        help="Named App Server permission profile for create_thread when callers omit permissions",
+    )
+    parser.add_argument(
+        "--default-approval-policy",
+        choices=("never", "on-request"),
+        default=os.environ.get(DEFAULT_APPROVAL_POLICY_ENV),
+        help="Approval policy for create_thread when callers omit approval_policy",
+    )
+    parser.add_argument(
+        "--default-approvals-reviewer",
+        choices=("user", "auto_review"),
+        default=os.environ.get(DEFAULT_APPROVALS_REVIEWER_ENV),
+        help="Approval reviewer for create_thread when callers omit approvals_reviewer",
+    )
     args = parser.parse_args()
     socket_path, ledger = open_endpoint_ledger(args.socket, args.state_dir)
-    bridge = Bridge(AppServer(socket_path), ledger)
+    bridge = Bridge(
+        AppServer(socket_path),
+        ledger,
+        default_permissions=args.default_permissions,
+        default_approval_policy=args.default_approval_policy,
+        default_approvals_reviewer=args.default_approvals_reviewer,
+    )
     make_server(bridge).run(transport="stdio")
 
 

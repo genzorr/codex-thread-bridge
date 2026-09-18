@@ -206,6 +206,37 @@ async def test_busy_thread_is_not_resumed_or_messaged(bridge, fake_server, tmp_p
     assert fake.count("thread/resume") == 0 and fake.count("turn/start") == 0
 
 
+async def test_steer_exact_active_turn_once_without_resuming(bridge, fake_server, tmp_path):
+    fake, _ = fake_server
+    created = await bridge.create_thread("create", str(tmp_path), prompt="initial")
+    tid = created["threadId"]
+    turn_id = created["turnId"]
+    fake.threads[tid]["status"] = {"type": "active"}
+    fake.threads[tid]["turns"][-1]["status"] = "inProgress"
+
+    sent = await bridge.steer_thread("steer", tid, turn_id, "change direction")
+    replayed = await bridge.steer_thread("steer", tid, turn_id, "change direction")
+    assert sent["status"] == "accepted" and sent["turnId"] == turn_id
+    assert replayed["replayed"] and fake.count("turn/steer") == 1
+    assert fake.count("thread/resume") == 0 and fake.count("turn/start") == 1
+    assert fake.threads[tid]["turns"][-1]["items"][-1]["text"] == "change direction"
+
+
+async def test_steer_rejects_stale_or_idle_turn_without_delivery(bridge, fake_server, tmp_path):
+    fake, _ = fake_server
+    created = await bridge.create_thread("create", str(tmp_path), prompt="initial")
+    tid = created["threadId"]
+    fake.threads[tid]["status"] = {"type": "active"}
+    fake.threads[tid]["turns"][-1]["status"] = "inProgress"
+
+    stale = await bridge.steer_thread("stale", tid, "wrong-turn", "do not deliver")
+    assert stale["status"] == "failed"
+    assert fake.threads[tid]["turns"][-1]["items"] == [{"type": "agentMessage", "text": "initial"}]
+    fake.threads[tid]["status"] = {"type": "idle"}
+    idle = await bridge.steer_thread("idle", tid, created["turnId"], "also do not deliver")
+    assert idle["status"] == "failed" and fake.count("turn/steer") == 2
+
+
 async def test_interactive_approval_policy_withholds_message(bridge, fake_server, tmp_path):
     fake, _ = fake_server
     created = await bridge.create_thread("create", str(tmp_path))

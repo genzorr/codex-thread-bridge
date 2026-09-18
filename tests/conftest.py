@@ -15,9 +15,15 @@ class FakeServer:
     def __init__(self):
         self.calls = []
         self.threads = {}
+        self.settings = {}
         self.reject = {}
         self.drop_after = None
         self.override_creation = {}
+        self.permission_profiles = [
+            {"id": ":read-only", "description": None, "allowed": True},
+            {"id": ":workspace", "description": None, "allowed": True},
+            {"id": "development-profile", "description": "Local development", "allowed": True},
+        ]
         self.approval_policy = "never"
         self.complete_turns = True
         self.goal = None
@@ -67,24 +73,57 @@ class FakeServer:
                     "thread": dict(thread),
                     "cwd": params["cwd"],
                     "runtimeWorkspaceRoots": params.get("runtimeWorkspaceRoots", [params["cwd"]]),
-                    "approvalPolicy": "never",
-                    "sandbox": {
-                        "type": {
-                            "read-only": "readOnly",
-                            "workspace-write": "workspaceWrite",
-                            "danger-full-access": "dangerFullAccess",
-                        }[params["sandbox"]],
-                        **({"networkAccess": False} if params["sandbox"] == "read-only" else {}),
-                    },
+                    "approvalPolicy": params.get("approvalPolicy", "never"),
+                    "approvalsReviewer": params.get("approvalsReviewer", "user"),
+                    "sandbox": (
+                        {
+                            "type": "workspaceWrite",
+                            "writableRoots": [params["cwd"]],
+                            "networkAccess": True,
+                            "excludeTmpdirEnvVar": False,
+                            "excludeSlashTmp": False,
+                        }
+                        if "permissions" in params
+                        else {
+                            "type": {
+                                "read-only": "readOnly",
+                                "workspace-write": "workspaceWrite",
+                                "danger-full-access": "dangerFullAccess",
+                            }[params["sandbox"]],
+                            **(
+                                {"networkAccess": False} if params["sandbox"] == "read-only" else {}
+                            ),
+                        }
+                    ),
+                    **(
+                        {"activePermissionProfile": {"id": params["permissions"]}}
+                        if "permissions" in params
+                        else {}
+                    ),
                     "model": params.get("model", "configured-default"),
                     "reasoningEffort": params.get("config", {}).get(
                         "model_reasoning_effort", "medium"
                     ),
                     **self.override_creation,
                 }
+                if "sandbox_workspace_write" in params.get("config", {}):
+                    policy = params["config"]["sandbox_workspace_write"]
+                    result["sandbox"] = {
+                        "type": "workspaceWrite",
+                        "writableRoots": policy["writable_roots"],
+                        "networkAccess": policy["network_access"],
+                        "excludeTmpdirEnvVar": policy["exclude_tmpdir_env_var"],
+                        "excludeSlashTmp": policy["exclude_slash_tmp"],
+                    }
+                result.update(self.override_creation)
+                self.settings[tid] = dict(result)
             elif method == "thread/name/set":
                 self.threads[params["threadId"]]["name"] = params["name"]
                 result = {}
+            elif method == "config/mcpServer/reload":
+                result = {}
+            elif method == "permissionProfile/list":
+                result = {"data": self.permission_profiles, "nextCursor": None}
             elif method == "turn/start":
                 thread = self.threads[params["threadId"]]
                 turn = {
@@ -94,6 +133,23 @@ class FakeServer:
                 }
                 thread["turns"].append(turn)
                 result = {"turn": turn}
+            elif method == "turn/steer":
+                thread = self.threads[params["threadId"]]
+                turn = thread["turns"][-1] if thread["turns"] else None
+                if (
+                    thread["status"]["type"] != "active"
+                    or turn is None
+                    or turn["status"] != "inProgress"
+                    or turn["id"] != params["expectedTurnId"]
+                ):
+                    await ws.send(
+                        json.dumps(
+                            {"id": ident, "error": {"code": -32602, "message": "turn not active"}}
+                        )
+                    )
+                    continue
+                turn["items"].append({"type": "userMessage", "text": params["input"][0]["text"]})
+                result = {"turnId": turn["id"]}
             elif method == "thread/read":
                 thread = dict(self.threads[params["threadId"]])
                 if not params.get("includeTurns"):
@@ -101,7 +157,27 @@ class FakeServer:
                 result = {"thread": thread}
             elif method == "thread/resume":
                 thread = self.threads[params["threadId"]]
-                result = {"thread": {**thread, "turns": []}, "approvalPolicy": self.approval_policy}
+                result = {**self.settings[params["threadId"]], "thread": {**thread, "turns": []}}
+                if self.approval_policy != "never":
+                    result["approvalPolicy"] = self.approval_policy
+            elif method == "thread/settings/update":
+                settings = self.settings[params["threadId"]]
+                settings.update(
+                    approvalPolicy=params["approvalPolicy"],
+                    approvalsReviewer=params["approvalsReviewer"],
+                )
+                if "permissions" in params:
+                    settings["activePermissionProfile"] = {"id": params["permissions"]}
+                    settings["sandbox"] = {
+                        "type": "workspaceWrite",
+                        "writableRoots": [settings["cwd"]],
+                        "networkAccess": True,
+                        "excludeTmpdirEnvVar": False,
+                        "excludeSlashTmp": False,
+                    }
+                else:
+                    settings["sandbox"] = params["sandboxPolicy"]
+                result = {}
             elif method == "thread/turns/list":
                 turns = list(reversed(self.threads[params["threadId"]]["turns"]))
                 try:
